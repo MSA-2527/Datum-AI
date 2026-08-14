@@ -1,0 +1,97 @@
+<Window x:Class="Datum.Studio.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="DATUM Studio"
+        Height="900" Width="1440"
+        MinHeight="600" MinWidth="900"
+        WindowStartupLocation="CenterScreen"
+        Background="#0A0F15">
+
+    <!--
+        The shell is deliberately almost nothing: a status strip and a WebView. All product
+        UI is the same React bundle the SOLIDWORKS task pane runs, so there is one
+        implementation to keep correct rather than two that drift.
+
+        The status strip exists because a blank WebView is indistinguishable from a crash.
+        When the orchestrator is down the user needs to see why and what to do, not an
+        empty window.
+    -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="#111923" BorderBrush="#243140" BorderThickness="0,0,0,1">
+            <Grid Margin="10,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="#61748C" Margin="0,0,8,0" />
+                    <TextBlock x:Name="StatusText"
+                               Text="Looking for the orchestrator…"
+                               Foreground="#95A8BF"
+                               FontFamily="Segoe UI Variable Text, Segoe UI"
+                               FontSize="12"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+
+                <TextBlock Grid.Column="1"
+                           Text="DATUM Studio"
+                           Foreground="#61748C"
+                           FontFamily="Segoe UI Variable Text, Segoe UI"
+                           FontSize="12"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center" />
+
+                <Button Grid.Column="2"
+                        x:Name="ReconnectButton"
+                        Content="Reconnect"
+                        Click="OnReconnectClick"
+                        Padding="10,3"
+                        Foreground="#E4EDF7"
+                        Background="#1E2A38"
+                        BorderBrush="#31435A"
+                        BorderThickness="1"
+                        FontSize="12"
+                        Cursor="Hand" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1">
+            <wv2:WebView2 x:Name="Web" Visibility="Collapsed" />
+
+            <!-- Shown whenever the WebView has nothing valid to display. -->
+            <Border x:Name="OfflinePanel" Background="#0A0F15">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="460">
+                    <TextBlock Text="DATUM Studio"
+                               Foreground="#E4EDF7"
+                               FontSize="22"
+                               FontFamily="Segoe UI Variable Text, Segoe UI"
+                               HorizontalAlignment="Center"
+                               Margin="0,0,0,10" />
+
+                    <TextBlock x:Name="OfflineMessage"
+                               Text="Looking for the orchestrator…"
+                               Foreground="#95A8BF"
+                               FontSize="13"
+                               TextWrapping="Wrap"
+                               TextAlignment="Center"
+                               Margin="0,0,0,18" />
+
+                    <TextBlock x:Name="OfflineHint"
+                               Foreground="#61748C"
+                               FontSize="12"
+                               TextWrapping="Wrap"
+                               TextAlignment="Center"
+                               FontFamily="Cascadia Code, Consolas" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

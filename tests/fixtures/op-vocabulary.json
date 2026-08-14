@@ -1,0 +1,55 @@
+{
+  "_comment": [
+    "Shared drift guard between the C# kernel and the TypeScript standalone modeller.",
+    "",
+    "Both sides consume the same Operation IR but have separate executors: the kernel",
+    "drives real SOLIDWORKS B-rep, the modeller evaluates 2.5D geometry locally. They can",
+    "silently diverge, and divergence shows up as an offline rehearsal that does not match",
+    "what SOLIDWORKS actually produces — which is worse than having no rehearsal at all.",
+    "",
+    "This file lists the operations the TypeScript engine claims to implement. The C# side",
+    "asserts every entry exists in OpCatalog; the TypeScript side asserts it handles every",
+    "entry. Adding an op to one engine without the other fails a build."
+  ],
+
+  "irVersion": "1.4",
+
+  "handledByStandaloneModeller": [
+    "feature.hole_wizard",
+    "feature.simple_hole",
+    "feature.fillet",
+    "feature.chamfer",
+    "feature.shell",
+    "feature.extrude_cut",
+    "feature.pattern_linear",
+    "feature.pattern_circular",
+    "feature.mirror",
+    "feature.edit.suppress",
+    "feature.edit.unsuppress",
+    "feature.edit.delete",
+    "param.set_global",
+    "param.add_global",
+    "doc.set_property",
+    "doc.set_properties_bulk",
+    "doc.set_material",
+    "sketch.fully_define",
+    "sketch.add_relation",
+    "feature.edit.reattach_reference"
+  ],
+
+  "_knownGap": [
+    "Operations the kernel implements but the standalone modeller deliberately does not.",
+    "These need a real geometric kernel; the modeller must not pretend to support them."
+  ],
+  "kernelOnly": [
+    "feature.revolve",
+    "feature.sweep",
+    "feature.loft",
+    "feature.boundary",
+    "surface.knit",
+    "surface.thicken",
+    "asm.mate",
+    "asm.insert_component",
+    "drw.create_from_model"
+  ]
+}

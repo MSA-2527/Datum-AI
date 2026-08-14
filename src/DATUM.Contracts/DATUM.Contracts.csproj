@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    netstandard2.0 so the same assembly loads into both the .NET Framework 4.8
+    kernel (in-process inside SLDWORKS.exe) and the .NET 8 orchestrator.
+    Keep this project dependency-free: it is loaded into the CAD process.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>Datum.Contracts</RootNamespace>
+    <AssemblyName>DATUM.Contracts</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
+</Project>

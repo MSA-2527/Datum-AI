@@ -1,0 +1,33 @@
+<Project>
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <WarningsAsErrors>CS8600;CS8602;CS8603;CS8618</WarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NeutralLanguage>en</NeutralLanguage>
+    <Company>DATUM</Company>
+    <Product>DATUM for SOLIDWORKS</Product>
+    <Version>0.1.0</Version>
+    <Deterministic>true</Deterministic>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+
+  <!--
+    Release builds are tuned for the hot paths documented in docs/02-architecture.md:
+    the STA event tap, the delta pump, and the operation executor. Tiered PGO and
+    ReadyToRun cut orchestrator cold-start; the kernel stays JIT-only because it is
+    loaded into SLDWORKS.exe and R2R images would bloat the add-in load time.
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <Optimize>true</Optimize>
+    <DebugType>portable</DebugType>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+</Project>

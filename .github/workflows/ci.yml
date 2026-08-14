@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  # DATUM.Kernel is deliberately absent from this job. It references the SOLIDWORKS
+  # interop assemblies, which ship with the product and are not redistributable, so it
+  # cannot build on a hosted runner. DATUM.NoSolidWorks.slnf is the buildable subset —
+  # and it happens to contain the entire safety model minus the COM calls.
+  dotnet:
+    name: .NET (contracts, orchestrator, tests)
+    # Windows because this is a Windows-only product: the orchestrator uses named-pipe
+    # ACLs and WindowsIdentity, which compile anywhere but only mean anything here.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Building the test project pulls in Contracts and Orchestrator transitively, and
+      # avoids depending on how a solution filter resolves the x64-only platform.
+      - name: Restore
+        run: dotnet restore tests/DATUM.Tests/DATUM.Tests.csproj
+
+      - name: Build
+        run: dotnet build tests/DATUM.Tests/DATUM.Tests.csproj -c Release --no-restore
+
+      - name: Test
+        run: >
+          dotnet test tests/DATUM.Tests/DATUM.Tests.csproj -c Release --no-build
+          --logger "trx;LogFileName=results.trx"
+          --collect:"XPlat Code Coverage"
+          --results-directory artifacts/test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-results
+          path: artifacts/test
+          if-no-files-found: ignore
+
+  # Verifies the kernel at least parses and that no non-interop compile error has crept
+  # in. It will fail on the missing SOLIDWORKS references, which is expected and why the
+  # step is advisory rather than gating.
+  kernel-syntax:
+    name: Kernel (advisory — needs a SOLIDWORKS seat to build)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Attempt kernel build
+        run: dotnet build src/DATUM.Kernel/DATUM.Kernel.csproj -c Release
+
+  ui:
+    name: UI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # `npm run build` runs `tsc --noEmit` first, so strict TypeScript is gating.
+      - name: Typecheck and build
+        run: npm run build
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+          if-no-files-found: error

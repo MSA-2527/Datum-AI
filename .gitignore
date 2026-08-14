@@ -1,0 +1,63 @@
+# ── .NET ─────────────────────────────────────────────────────────────────────
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userprefs
+*.dll.config
+*.pdb
+*.cache
+artifacts/
+TestResults/
+BenchmarkDotNet.Artifacts/
+*.coverage
+*.coverlet.json
+coverage*.xml
+coverage*.json
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+*.sln.docstates
+*.DotSettings.user
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# ── Node / UI ────────────────────────────────────────────────────────────────
+node_modules/
+ui/dist/
+ui/.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ── DATUM runtime state ──────────────────────────────────────────────────────
+# The orchestrator writes its port + per-session bearer token here; the kernel
+# writes rolling logs. Neither belongs in source control, and session.json is a
+# live credential.
+session.json
+*.datum-session
+logs/
+*.log
+datum.db
+datum.db-shm
+datum.db-wal
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pfx
+*.snk
+
+# ── OS noise ─────────────────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store

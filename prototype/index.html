@@ -1,0 +1,1199 @@
+<title>DATUM — SOLIDWORKS Design Copilot</title>
+
+<style>
+/* ─────────────────────────  TOKENS  ───────────────────────── */
+:root{
+  --ground:#0A0F15; --surface:#111923; --raised:#18222E; --input:#1E2A38;
+  --hairline:#243140; --edge:#31435A;
+  --tx0:#E4EDF7; --tx1:#95A8BF; --tx2:#61748C;
+  --ai:#4A8CFF; --ai-dim:#16305C;
+  --det:#17C4A0; --det-dim:#0C3D36;
+  --warn:#F0A32A; --warn-dim:#463108;
+  --dang:#F2495C; --dang-dim:#4A1520;
+  --ok:#31C07A;  --ok-dim:#0E3A26;
+  --viz:#A78BFA; --viz-dim:#2E2352;
+  --grid:#1A2634;
+  --shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 28px -12px rgba(0,0,0,.7);
+  --ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;
+  --mono:"Cascadia Code","Consolas",ui-monospace,"SF Mono",monospace;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --ground:#EDF1F6; --surface:#FFFFFF; --raised:#FFFFFF; --input:#F1F4F9;
+    --hairline:#DCE3EC; --edge:#C2CCDA;
+    --tx0:#0C141D; --tx1:#4E5F76; --tx2:#78889D;
+    --ai:#1F63E0; --ai-dim:#DCE8FF;
+    --det:#0A8A72; --det-dim:#D3F2EA;
+    --warn:#9A6206; --warn-dim:#FBEDD3;
+    --dang:#C8203A; --dang-dim:#FBDDE2;
+    --ok:#12804F;  --ok-dim:#D6F0E2;
+    --viz:#6D42D9; --viz-dim:#E8E0FC;
+    --grid:#E3E9F1;
+    --shadow:0 1px 2px rgba(16,32,54,.06), 0 10px 30px -16px rgba(16,32,54,.28);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0A0F15; --surface:#111923; --raised:#18222E; --input:#1E2A38;
+  --hairline:#243140; --edge:#31435A;
+  --tx0:#E4EDF7; --tx1:#95A8BF; --tx2:#61748C;
+  --ai:#4A8CFF; --ai-dim:#16305C; --det:#17C4A0; --det-dim:#0C3D36;
+  --warn:#F0A32A; --warn-dim:#463108; --dang:#F2495C; --dang-dim:#4A1520;
+  --ok:#31C07A; --ok-dim:#0E3A26; --viz:#A78BFA; --viz-dim:#2E2352;
+  --grid:#1A2634;
+  --shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 28px -12px rgba(0,0,0,.7);
+}
+:root[data-theme="light"]{
+  --ground:#EDF1F6; --surface:#FFFFFF; --raised:#FFFFFF; --input:#F1F4F9;
+  --hairline:#DCE3EC; --edge:#C2CCDA;
+  --tx0:#0C141D; --tx1:#4E5F76; --tx2:#78889D;
+  --ai:#1F63E0; --ai-dim:#DCE8FF; --det:#0A8A72; --det-dim:#D3F2EA;
+  --warn:#9A6206; --warn-dim:#FBEDD3; --dang:#C8203A; --dang-dim:#FBDDE2;
+  --ok:#12804F; --ok-dim:#D6F0E2; --viz:#6D42D9; --viz-dim:#E8E0FC;
+  --grid:#E3E9F1;
+  --shadow:0 1px 2px rgba(16,32,54,.06), 0 10px 30px -16px rgba(16,32,54,.28);
+}
+
+/* ─────────────────────────  BASE  ───────────────────────── */
+*{box-sizing:border-box;}
+body{
+  margin:0; background:var(--ground); color:var(--tx0);
+  font-family:var(--ui); font-size:15px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1240px; margin:0 auto; padding:0 24px 80px;}
+h1,h2,h3,h4{margin:0; text-wrap:balance; font-weight:600; letter-spacing:-.01em;}
+p{margin:0;}
+code,.num{font-family:var(--mono); font-variant-numeric:tabular-nums;}
+button{font-family:inherit; font-size:inherit; color:inherit; background:none; border:none; cursor:pointer;}
+:focus-visible{outline:2px solid var(--ai); outline-offset:2px; border-radius:4px;}
+@media (prefers-reduced-motion: reduce){ *{animation:none !important; transition:none !important;} }
+
+.eyebrow{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--tx2);
+}
+
+/* ─────────────────────  TITLE BLOCK HEADER  ───────────────────── */
+.tb{
+  margin:28px 0 0; border:1px solid var(--edge); background:var(--surface);
+  display:grid; grid-template-columns:minmax(0,2.2fr) repeat(4, minmax(0,1fr));
+}
+.tb-cell{padding:11px 14px; border-right:1px solid var(--hairline); min-width:0;}
+.tb-cell:last-child{border-right:none;}
+.tb-k{font-family:var(--mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--tx2); display:block; margin-bottom:3px;}
+.tb-v{font-size:13px; color:var(--tx0); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.tb-title{display:flex; align-items:center; gap:11px;}
+.mark{
+  width:26px; height:26px; flex:none; border:1.5px solid var(--ai); border-radius:3px;
+  position:relative;
+}
+.mark::before,.mark::after{content:""; position:absolute; background:var(--ai);}
+.mark::before{left:50%; top:4px; bottom:4px; width:1.5px; transform:translateX(-50%);}
+.mark::after{top:50%; left:4px; right:4px; height:1.5px; transform:translateY(-50%);}
+.tb-title strong{font-size:17px; letter-spacing:.04em; font-weight:600;}
+.tb-title span{font-size:12px; color:var(--tx1);}
+@media (max-width:900px){ .tb{grid-template-columns:1fr 1fr;} .tb-cell{border-bottom:1px solid var(--hairline);} }
+
+.thesis{
+  margin:22px 0 40px; display:grid; grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);
+  gap:36px; align-items:start;
+}
+.thesis h1{font-size:29px; line-height:1.22; max-width:20ch;}
+.thesis p{color:var(--tx1); font-size:14.5px; max-width:62ch;}
+.thesis p + p{margin-top:12px;}
+@media (max-width:860px){ .thesis{grid-template-columns:1fr; gap:18px;} }
+
+.sec{margin:56px 0 0;}
+.sec-head{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:6px;}
+.sec-head h2{font-size:20px;}
+.sec-note{color:var(--tx1); font-size:14px; max-width:74ch; margin-bottom:18px;}
+
+/* ─────────────────────  APP CHROME  ───────────────────── */
+.app{
+  border:1px solid var(--edge); border-radius:8px; overflow:hidden;
+  background:var(--surface); box-shadow:var(--shadow);
+}
+.app-bar{
+  display:flex; align-items:center; gap:10px; padding:0 12px; height:34px;
+  background:var(--raised); border-bottom:1px solid var(--hairline);
+  font-size:12px; color:var(--tx1);
+}
+.dots{display:flex; gap:6px;}
+.dots i{width:9px; height:9px; border-radius:50%; background:var(--hairline); display:block;}
+.app-bar .sw{font-weight:600; color:var(--tx0); font-size:12px;}
+.ribbon{
+  display:flex; gap:2px; padding:0 8px; height:28px; align-items:stretch;
+  border-bottom:1px solid var(--hairline); background:var(--surface);
+}
+.ribbon b{
+  font-weight:400; font-size:11.5px; color:var(--tx2); padding:0 10px;
+  display:flex; align-items:center; border-bottom:2px solid transparent;
+}
+.ribbon b.on{color:var(--ai); border-bottom-color:var(--ai);}
+
+.stage{display:grid; grid-template-columns:minmax(0,1fr) 396px; min-height:610px;}
+@media (max-width:1000px){ .stage{grid-template-columns:1fr;} }
+
+/* ── graphics area ── */
+.gfx{position:relative; background:var(--ground); border-right:1px solid var(--hairline); min-width:0;}
+.gfx svg{display:block; width:100%; height:100%;}
+.gfx-tag{
+  position:absolute; left:12px; top:10px; font-family:var(--mono); font-size:10px;
+  letter-spacing:.12em; text-transform:uppercase; color:var(--tx2);
+}
+.gfx-read{
+  position:absolute; left:12px; bottom:10px; display:flex; gap:16px; flex-wrap:wrap;
+  font-family:var(--mono); font-size:11px; color:var(--tx1); font-variant-numeric:tabular-nums;
+}
+.gfx-read b{color:var(--tx0); font-weight:600;}
+.gfx-hint{
+  position:absolute; right:12px; top:10px; font-size:11px; color:var(--tx2);
+  border:1px dashed var(--hairline); padding:3px 8px; border-radius:4px;
+}
+
+/* ── panel ── */
+.panel{display:flex; flex-direction:column; background:var(--surface); min-width:0;}
+.p-head{
+  display:flex; align-items:center; gap:8px; padding:8px 10px; height:38px;
+  border-bottom:1px solid var(--hairline); flex:none;
+}
+.p-head .mark{width:18px; height:18px; border-width:1.25px;}
+.p-head .nm{font-size:13px; font-weight:600; letter-spacing:.05em;}
+.prov{
+  margin-left:auto; display:flex; align-items:center; gap:6px; font-size:11px;
+  border:1px solid var(--hairline); border-radius:999px; padding:3px 9px 3px 7px;
+  color:var(--tx1); background:var(--input); cursor:pointer; white-space:nowrap;
+}
+.prov:hover{border-color:var(--edge); color:var(--tx0);}
+.prov .d{width:7px; height:7px; border-radius:50%; background:var(--det); flex:none;}
+.prov[data-p="byo"] .d{background:var(--ai);}
+.prov[data-p="pro"] .d{background:var(--viz);}
+
+.ctx{
+  padding:7px 10px; border-bottom:1px solid var(--hairline); flex:none;
+  display:flex; flex-direction:column; gap:5px; background:var(--raised);
+}
+.ctx-1{display:flex; align-items:center; gap:7px; font-size:12px; min-width:0;}
+.ctx-1 .doc{font-weight:600; color:var(--tx0); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.ctx-1 .sep{color:var(--tx2);}
+.ctx-1 .cfg{color:var(--tx1); font-family:var(--mono); font-size:11px;}
+.pills{display:flex; gap:5px; flex-wrap:wrap;}
+.pill{
+  display:inline-flex; align-items:center; gap:4px; font-size:10.5px; padding:2px 7px;
+  border-radius:999px; border:1px solid var(--hairline); color:var(--tx1);
+  font-family:var(--mono); letter-spacing:.02em;
+}
+.pill.ok{color:var(--ok); border-color:color-mix(in srgb, var(--ok) 32%, transparent); background:var(--ok-dim);}
+.pill.warn{color:var(--warn); border-color:color-mix(in srgb, var(--warn) 32%, transparent); background:var(--warn-dim);}
+.pill.det{color:var(--det); border-color:color-mix(in srgb, var(--det) 32%, transparent); background:var(--det-dim);}
+
+.stream{flex:1; overflow-y:auto; padding:12px 10px; display:flex; flex-direction:column; gap:11px; min-height:0;}
+
+/* messages */
+.msg-u{
+  align-self:flex-end; max-width:88%; background:var(--input); border:1px solid var(--hairline);
+  border-radius:8px 8px 3px 8px; padding:8px 10px; font-size:13px;
+}
+.msg-u .ref{
+  display:inline-flex; align-items:center; gap:4px; margin-top:6px; font-family:var(--mono);
+  font-size:10.5px; color:var(--viz); background:var(--viz-dim); padding:2px 6px; border-radius:4px;
+}
+
+/* cards */
+.card{border:1px solid var(--hairline); border-radius:8px; background:var(--raised); overflow:hidden;}
+.card.plan{border-color:color-mix(in srgb, var(--ai) 34%, var(--hairline));}
+.card.res{border-color:color-mix(in srgb, var(--ok) 34%, var(--hairline));}
+.card.cap{border-color:color-mix(in srgb, var(--warn) 40%, var(--hairline));}
+.c-strip{
+  display:flex; align-items:center; gap:7px; padding:7px 10px; font-family:var(--mono);
+  font-size:10px; letter-spacing:.13em; text-transform:uppercase;
+  border-bottom:1px solid var(--hairline); background:color-mix(in srgb, var(--ai) 9%, transparent);
+  color:var(--ai);
+}
+.card.res .c-strip{background:color-mix(in srgb, var(--ok) 9%, transparent); color:var(--ok);}
+.card.cap .c-strip{background:color-mix(in srgb, var(--warn) 10%, transparent); color:var(--warn);}
+.c-strip .cnt{margin-left:auto; color:var(--tx2); letter-spacing:.06em;}
+.c-body{padding:10px;}
+.intent{font-size:13px; line-height:1.45; margin-bottom:10px;}
+
+.assume{border:1px solid color-mix(in srgb, var(--warn) 26%, var(--hairline)); border-radius:6px; background:var(--warn-dim); padding:7px 9px; margin-bottom:10px;}
+.assume h5{margin:0 0 5px; font-size:10.5px; font-family:var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--warn); font-weight:600;}
+.assume ul{margin:0; padding-left:15px; font-size:12px; color:var(--tx1); display:flex; flex-direction:column; gap:3px;}
+
+.ops{display:flex; flex-direction:column; gap:1px; background:var(--hairline); border:1px solid var(--hairline); border-radius:6px; overflow:hidden;}
+.op{
+  background:var(--raised); padding:8px 9px; display:grid;
+  grid-template-columns:22px minmax(0,1fr); gap:8px; cursor:pointer; transition:background .12s;
+}
+.op:hover,.op.hot{background:var(--input);}
+.op .ic{
+  width:22px; height:22px; border-radius:4px; display:grid; place-items:center;
+  background:var(--ai-dim); color:var(--ai); font-size:12px; font-family:var(--mono);
+}
+.op[data-k="fillet"] .ic{background:var(--ai-dim); color:var(--ai);}
+.op .nm{font-size:12.5px; font-weight:500;}
+.op .pr{font-family:var(--mono); font-size:11px; color:var(--tx1); margin-top:2px;}
+.op .tg{font-family:var(--mono); font-size:11px; color:var(--viz); margin-top:3px; display:flex; align-items:center; gap:5px;}
+.op .badge{
+  display:inline-block; margin-top:5px; font-size:9.5px; font-family:var(--mono);
+  letter-spacing:.08em; text-transform:uppercase; padding:1.5px 6px; border-radius:3px;
+  background:var(--warn-dim); color:var(--warn);
+}
+.op .bar{grid-column:1/-1; height:2px; background:var(--hairline); border-radius:2px; overflow:hidden; margin-top:7px;}
+.op .bar i{display:block; height:100%; width:0; background:var(--ai); transition:width .5s linear;}
+
+.diff{margin-top:10px; border-top:1px dashed var(--hairline); padding-top:9px;}
+.diff h5{margin:0 0 6px; font-size:10.5px; font-family:var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--tx2); font-weight:500;}
+.diff div{font-family:var(--mono); font-size:11.5px; color:var(--tx1); padding-left:2px;}
+.diff div.add{color:var(--ok);}
+
+.c-foot{display:flex; align-items:center; gap:7px; padding:9px 10px; border-top:1px solid var(--hairline); background:var(--surface);}
+.btn{
+  border:1px solid var(--hairline); background:var(--input); color:var(--tx1);
+  padding:5px 10px; border-radius:5px; font-size:12px; transition:all .12s;
+}
+.btn:hover{border-color:var(--edge); color:var(--tx0);}
+.btn.pri{background:var(--ai); border-color:var(--ai); color:#fff; font-weight:600; margin-left:auto;}
+.btn.pri:hover{filter:brightness(1.1); color:#fff;}
+.btn.det{background:var(--det); border-color:var(--det); color:#04231D; font-weight:600;}
+.btn.gho{background:transparent;}
+.btn .k{font-family:var(--mono); font-size:10px; opacity:.75; margin-left:5px;}
+
+.verify{display:flex; flex-direction:column; gap:1px; background:var(--hairline); border:1px solid var(--hairline); border-radius:6px; overflow:hidden;}
+.vrow{background:var(--raised); display:grid; grid-template-columns:16px minmax(0,1fr) auto; gap:8px; align-items:center; padding:7px 9px; font-size:12px;}
+.vrow .g{font-family:var(--mono); font-size:12px; text-align:center;}
+.vrow.ok .g{color:var(--ok);} .vrow.warn .g{color:var(--warn);} .vrow.bad .g{color:var(--dang);}
+.vrow .v{font-family:var(--mono); font-size:11.5px; color:var(--tx1); font-variant-numeric:tabular-nums; white-space:nowrap;}
+.vsub{background:var(--raised); padding:0 9px 8px 33px; font-size:11.5px; color:var(--tx1); display:flex; align-items:center; gap:8px;}
+.vsub button{font-size:11px; color:var(--ai); text-decoration:underline; text-underline-offset:2px;}
+
+/* selection chip + composer */
+.selchip{
+  flex:none; display:flex; align-items:center; gap:7px; padding:6px 10px;
+  border-top:1px solid var(--hairline); background:var(--viz-dim);
+  font-size:11.5px; color:var(--viz); font-family:var(--mono);
+}
+.selchip .x{margin-left:auto; color:var(--tx2); font-family:var(--ui); font-size:13px;}
+.comp{flex:none; border-top:1px solid var(--hairline); padding:9px 10px; background:var(--surface);}
+.starters{display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;}
+.starter{
+  font-size:11.5px; border:1px dashed var(--edge); color:var(--tx1); background:transparent;
+  padding:4px 9px; border-radius:999px; text-align:left; transition:all .12s;
+}
+.starter:hover{border-style:solid; border-color:var(--ai); color:var(--ai);}
+.cbox{border:1px solid var(--edge); border-radius:7px; background:var(--input); overflow:hidden; transition:border-color .15s;}
+.cbox:focus-within{border-color:var(--ai);}
+.cbox textarea{
+  width:100%; border:none; background:transparent; color:var(--tx0); resize:none;
+  padding:9px 10px 4px; font-family:var(--ui); font-size:13px; line-height:1.45; outline:none;
+}
+.cbox textarea::placeholder{color:var(--tx2);}
+.crow{display:flex; align-items:center; gap:5px; padding:5px 7px 7px;}
+.mode{
+  display:inline-flex; align-items:center; gap:5px; font-size:11.5px; padding:3px 8px;
+  border-radius:5px; border:1px solid var(--hairline); color:var(--tx1); background:var(--surface);
+}
+.mode.on{color:var(--ai); border-color:color-mix(in srgb, var(--ai) 45%, transparent); background:var(--ai-dim);}
+.mode.ask.on{color:var(--tx0); border-color:var(--edge); background:var(--input);}
+.mode.batch.on{color:var(--det); border-color:color-mix(in srgb, var(--det) 45%, transparent); background:var(--det-dim);}
+.iconb{width:26px; height:26px; border-radius:5px; color:var(--tx2); display:grid; place-items:center; font-size:13px;}
+.iconb:hover{background:var(--input); color:var(--tx0);}
+.send{margin-left:auto; background:var(--ai); color:#fff; border-radius:5px; padding:4px 12px; font-size:12px; font-weight:600;}
+.send:hover{filter:brightness(1.1);}
+
+.rail{
+  flex:none; display:flex; border-top:1px solid var(--hairline); background:var(--raised);
+}
+.rail button{
+  flex:1; padding:8px 4px; font-size:11px; color:var(--tx2); display:flex;
+  align-items:center; justify-content:center; gap:5px; border-top:2px solid transparent;
+  margin-top:-1px; transition:color .12s;
+}
+.rail button:hover{color:var(--tx1);}
+.rail button.on{color:var(--ai); border-top-color:var(--ai); background:var(--surface);}
+.rail .bdg{
+  font-family:var(--mono); font-size:9px; background:var(--warn); color:#2A1B00;
+  border-radius:999px; padding:0 5px; font-weight:700;
+}
+
+/* tab content */
+.tabc{flex:1; overflow-y:auto; padding:10px; min-height:0;}
+.tree{display:flex; flex-direction:column; font-size:12.5px;}
+.tnode{
+  display:grid; grid-template-columns:16px 18px minmax(0,1fr) auto; gap:6px; align-items:center;
+  padding:4px 6px; border-radius:5px; cursor:pointer;
+}
+.tnode:hover{background:var(--input);}
+.tnode .ic{font-family:var(--mono); font-size:11px; color:var(--tx2); text-align:center;}
+.tnode .lb{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.tnode.ind{padding-left:22px;}
+.tnode .tag{font-family:var(--mono); font-size:9px; letter-spacing:.06em; padding:1px 5px; border-radius:3px;}
+.tag.ai{background:var(--ai-dim); color:var(--ai);}
+.tag.w{background:var(--warn-dim); color:var(--warn);}
+.tag.e{background:var(--dang-dim); color:var(--dang);}
+.thead{
+  margin-top:12px; padding-top:10px; border-top:1px solid var(--hairline);
+  display:grid; grid-template-columns:1fr 1fr; gap:8px;
+}
+.stat{background:var(--raised); border:1px solid var(--hairline); border-radius:6px; padding:8px 9px;}
+.stat b{display:block; font-family:var(--mono); font-size:16px; font-variant-numeric:tabular-nums; color:var(--tx0);}
+.stat span{font-size:10.5px; font-family:var(--mono); letter-spacing:.08em; text-transform:uppercase; color:var(--tx2);}
+
+.prow{padding:9px 0; border-bottom:1px solid var(--hairline);}
+.prow:last-child{border-bottom:none;}
+.plab{display:flex; align-items:baseline; gap:8px; margin-bottom:6px;}
+.plab .n{font-size:12.5px; font-weight:500;}
+.plab .eq{font-family:var(--mono); font-size:10.5px; color:var(--tx2); margin-left:auto;}
+.plab .v{font-family:var(--mono); font-size:13px; color:var(--det); font-variant-numeric:tabular-nums; min-width:66px; text-align:right;}
+input[type=range]{
+  -webkit-appearance:none; appearance:none; width:100%; height:4px; border-radius:3px;
+  background:var(--input); border:1px solid var(--hairline); cursor:pointer;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none; appearance:none; width:14px; height:14px; border-radius:50%;
+  background:var(--det); border:2px solid var(--surface); box-shadow:0 0 0 1px var(--det);
+}
+input[type=range]::-moz-range-thumb{
+  width:12px; height:12px; border-radius:50%; background:var(--det);
+  border:2px solid var(--surface); box-shadow:0 0 0 1px var(--det);
+}
+.pnote{
+  margin-top:10px; font-size:11.5px; color:var(--tx1); background:var(--det-dim);
+  border:1px solid color-mix(in srgb, var(--det) 28%, transparent); border-radius:6px; padding:8px 9px;
+}
+.pnote b{color:var(--det); font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; display:block; margin-bottom:3px;}
+
+.find{border:1px solid var(--hairline); border-radius:7px; background:var(--raised); padding:9px 10px; margin-bottom:8px;}
+.find .fh{display:flex; align-items:center; gap:7px; margin-bottom:5px;}
+.find .sev{font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; padding:1.5px 6px; border-radius:3px;}
+.sev.w{background:var(--warn-dim); color:var(--warn);} .sev.e{background:var(--dang-dim); color:var(--dang);}
+.find .rid{font-family:var(--mono); font-size:10.5px; color:var(--tx2); margin-left:auto;}
+.find p{font-size:12.5px; color:var(--tx0); margin-bottom:4px;}
+.find .why{font-size:11.5px; color:var(--tx1);}
+.find .fa{display:flex; gap:6px; margin-top:8px;}
+.find .fa .btn{padding:3px 9px; font-size:11.5px;}
+
+/* ─────────────────────  STUDIO MOCK  ───────────────────── */
+.studio{display:grid; grid-template-columns:46px 220px minmax(0,1fr) 300px; min-height:430px; font-size:12px;}
+@media (max-width:1000px){ .studio{grid-template-columns:46px 1fr;} .studio .st-c,.studio .st-r{display:none;} }
+.st-rail{background:var(--raised); border-right:1px solid var(--hairline); display:flex; flex-direction:column; padding:6px 0; gap:2px;}
+.st-rail i{
+  height:34px; display:grid; place-items:center; color:var(--tx2); font-size:14px;
+  font-style:normal; border-left:2px solid transparent; cursor:pointer;
+}
+.st-rail i:hover{color:var(--tx1);}
+.st-rail i.on{color:var(--ai); border-left-color:var(--ai); background:var(--surface);}
+.st-col{border-right:1px solid var(--hairline); padding:9px 10px; overflow:hidden; min-width:0;}
+.st-h{font-family:var(--mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--tx2); margin-bottom:8px;}
+.st-c{padding:0; display:flex; flex-direction:column; background:var(--ground);}
+.st-view{flex:1; position:relative; min-height:180px; border-bottom:1px solid var(--hairline);}
+.st-view svg{width:100%; height:100%; display:block;}
+.st-params{padding:9px 10px; background:var(--surface);}
+.st-p{display:grid; grid-template-columns:52px 1fr 62px; gap:8px; align-items:center; padding:3px 0; font-size:11.5px;}
+.st-p .t{color:var(--tx1);}
+.st-p .b{height:4px; border-radius:3px; background:var(--input); overflow:hidden;}
+.st-p .b i{display:block; height:100%; background:var(--det);}
+.st-p .v{font-family:var(--mono); text-align:right; color:var(--tx0); font-variant-numeric:tabular-nums;}
+.st-r{background:var(--surface); padding:9px 10px; display:flex; flex-direction:column; gap:8px; min-width:0;}
+.st-log{
+  grid-column:1/-1; border-top:1px solid var(--hairline); background:var(--raised);
+  padding:6px 12px; display:flex; gap:18px; font-family:var(--mono); font-size:10.5px;
+  color:var(--tx2); overflow-x:auto; white-space:nowrap;
+}
+.st-log b{color:var(--ok); font-weight:400;}
+.mini{border:1px solid var(--hairline); border-radius:6px; padding:8px 9px; background:var(--raised);}
+.mini .mh{font-size:11.5px; font-weight:600; margin-bottom:4px;}
+.mini .mt{font-size:11px; color:var(--tx1); line-height:1.45;}
+
+/* ─────────────────────  PIPELINE  ───────────────────── */
+.pipe{display:grid; grid-template-columns:repeat(9,minmax(0,1fr)); gap:0; border:1px solid var(--hairline); border-radius:8px; overflow:hidden; background:var(--surface);}
+@media (max-width:1000px){ .pipe{grid-template-columns:repeat(3,1fr);} }
+@media (max-width:620px){ .pipe{grid-template-columns:1fr 1fr;} }
+.step{padding:11px 10px; border-right:1px solid var(--hairline); position:relative; min-width:0;}
+.step:last-child{border-right:none;}
+.step .n{font-family:var(--mono); font-size:10px; color:var(--tx2); letter-spacing:.1em;}
+.step .t{font-size:12.5px; font-weight:600; margin:4px 0 3px;}
+.step .d{font-size:11px; color:var(--tx1); line-height:1.4;}
+.step.safe{background:color-mix(in srgb, var(--ok) 6%, transparent);}
+.step.safe .n{color:var(--ok);}
+.step.mut{background:color-mix(in srgb, var(--ai) 7%, transparent);}
+.step.mut .n{color:var(--ai);}
+.pipe-key{display:flex; gap:16px; margin-top:9px; font-size:11.5px; color:var(--tx1); flex-wrap:wrap;}
+.pipe-key span{display:inline-flex; align-items:center; gap:6px;}
+.pipe-key i{width:10px; height:10px; border-radius:2px; display:block;}
+
+/* ─────────────────────  TABLES / GRIDS  ───────────────────── */
+.scroll{overflow-x:auto; border:1px solid var(--hairline); border-radius:8px; background:var(--surface);}
+table{border-collapse:collapse; width:100%; font-size:13px; min-width:620px;}
+th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--hairline); vertical-align:top;}
+th{
+  font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase;
+  color:var(--tx2); font-weight:500; background:var(--raised); position:sticky; top:0;
+}
+tr:last-child td{border-bottom:none;}
+td.c{text-align:center; font-family:var(--mono);}
+.y{color:var(--ok);} .n{color:var(--tx2);} .pro{color:var(--viz);}
+td b{font-weight:600;}
+td small{display:block; color:var(--tx1); font-size:11.5px; margin-top:2px;}
+
+.vocab{display:grid; grid-template-columns:repeat(auto-fill,minmax(232px,1fr)); gap:10px;}
+.vg{border:1px solid var(--hairline); border-radius:7px; background:var(--surface); padding:10px 11px;}
+.vg h4{font-family:var(--mono); font-size:11.5px; color:var(--ai); margin-bottom:6px; letter-spacing:.02em;}
+.vg.q h4{color:var(--ok);} .vg.d h4{color:var(--det);} .vg.x h4{color:var(--warn);}
+.vg p{font-size:11.5px; color:var(--tx1); line-height:1.55; font-family:var(--mono); word-break:break-word;}
+
+.cards3{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px;}
+.tier{border:1px solid var(--hairline); border-radius:8px; background:var(--surface); padding:14px 15px; display:flex; flex-direction:column; gap:9px;}
+.tier.hi{border-color:color-mix(in srgb, var(--viz) 45%, transparent); background:linear-gradient(180deg, color-mix(in srgb, var(--viz) 7%, var(--surface)), var(--surface));}
+.tier .tt{display:flex; align-items:center; gap:8px;}
+.tier h3{font-size:15px;}
+.tier .px{font-family:var(--mono); font-size:11px; color:var(--tx2); margin-left:auto;}
+.tier ul{margin:0; padding-left:16px; font-size:12.5px; color:var(--tx1); display:flex; flex-direction:column; gap:5px;}
+.tier .lead{font-size:12.5px; color:var(--tx1);}
+
+.foot{margin-top:56px; padding-top:18px; border-top:1px solid var(--hairline); display:flex; gap:24px; flex-wrap:wrap; font-size:12.5px; color:var(--tx1);}
+.foot code{background:var(--input); border:1px solid var(--hairline); padding:1px 6px; border-radius:4px; font-size:11.5px;}
+
+@keyframes rise{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:none;}}
+.rise{animation:rise .18s cubic-bezier(.2,0,0,1) both;}
+@keyframes pulse{0%,100%{opacity:1;} 50%{opacity:.45;}}
+.pulsing{animation:pulse 1.1s ease-in-out infinite;}
+</style>
+
+<div class="wrap">
+
+  <!-- ══════════ TITLE BLOCK ══════════ -->
+  <div class="tb">
+    <div class="tb-cell tb-title">
+      <span class="mark" aria-hidden="true"></span>
+      <span>
+        <strong>DATUM</strong><br>
+        <span>SOLIDWORKS design copilot</span>
+      </span>
+    </div>
+    <div class="tb-cell"><span class="tb-k">Surface</span><span class="tb-v">Task pane + Studio</span></div>
+    <div class="tb-cell"><span class="tb-k">Host</span><span class="tb-v num">SW 2022–2026</span></div>
+    <div class="tb-cell"><span class="tb-k">Output</span><span class="tb-v">Native parametric</span></div>
+    <div class="tb-cell"><span class="tb-k">Rev</span><span class="tb-v num">A · Jul 2026</span></div>
+  </div>
+
+  <div class="thesis">
+    <h1>Intent goes in. Native feature trees come out.</h1>
+    <div>
+      <p>DATUM never generates geometry. It plans a list of typed parametric operations, shows you exactly what they resolve to, and lets SOLIDWORKS execute them through its own API — so the tree is real, the design intent is real, and you can edit it by hand afterwards like anything else you modelled.</p>
+      <p>The whole deterministic core is free and runs offline. The model is an accelerant, not the product.</p>
+    </div>
+  </div>
+
+  <!-- ══════════ SURFACE 1: TASK PANE ══════════ -->
+  <div class="sec">
+    <div class="sec-head">
+      <span class="eyebrow">Primary surface</span>
+      <h2>Docked in SOLIDWORKS</h2>
+    </div>
+    <p class="sec-note">This prototype is live. Send a prompt, hover the operations to see them resolve against the geometry, apply the plan, and undo it. Switch providers to watch the free/Pro capability boundary behave honestly instead of nagging.</p>
+
+    <div class="app">
+      <div class="app-bar">
+        <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="sw">SOLIDWORKS 2026</span>
+        <span>bracket_v3.SLDPRT</span>
+        <button class="btn gho" id="themeBtn" style="margin-left:auto;padding:2px 9px;font-size:11px;">Toggle theme</button>
+      </div>
+      <div class="ribbon">
+        <b>Features</b><b>Sketch</b><b>Evaluate</b><b>Sheet Metal</b><b class="on">DATUM</b>
+      </div>
+
+      <div class="stage">
+        <!-- graphics area -->
+        <div class="gfx">
+          <span class="gfx-tag">Graphics area — top view</span>
+          <span class="gfx-hint">hover an operation →</span>
+          <svg id="vp" viewBox="0 0 460 400" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Parametric mounting plate, top view, with dimensions">
+            <defs>
+              <pattern id="gr" width="20" height="20" patternUnits="userSpaceOnUse">
+                <path d="M20 0H0V20" fill="none" stroke="var(--grid)" stroke-width="1"/>
+              </pattern>
+              <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+                <path d="M0,0 L8,3 L0,6 z" fill="var(--tx2)"/>
+              </marker>
+              <marker id="arS" markerWidth="9" markerHeight="9" refX="1" refY="3" orient="auto">
+                <path d="M8,0 L0,3 L8,6 z" fill="var(--tx2)"/>
+              </marker>
+            </defs>
+            <rect width="460" height="400" fill="url(#gr)"/>
+            <!-- centre axes -->
+            <line id="axH" x1="60" y1="180" x2="400" y2="180" stroke="var(--tx2)" stroke-width="0.8" stroke-dasharray="14 4 3 4" opacity=".5"/>
+            <line id="axV" x1="230" y1="40" x2="230" y2="320" stroke="var(--tx2)" stroke-width="0.8" stroke-dasharray="14 4 3 4" opacity=".5"/>
+            <!-- plate -->
+            <rect id="plate" x="168" y="140" width="124" height="80" rx="0"
+                  fill="color-mix(in srgb, var(--ai) 9%, transparent)" stroke="var(--tx0)" stroke-width="1.6"/>
+            <!-- fillet highlight overlay -->
+            <rect id="filletHi" x="168" y="140" width="124" height="80" rx="0"
+                  fill="none" stroke="var(--viz)" stroke-width="3" opacity="0"/>
+            <!-- slot -->
+            <rect id="slot" x="210" y="172" width="40" height="16" rx="8"
+                  fill="var(--ground)" stroke="var(--tx1)" stroke-width="1.2"/>
+            <!-- holes -->
+            <g id="holes" opacity="0"></g>
+            <!-- dimensions -->
+            <g id="dims" font-family="Cascadia Code, Consolas, monospace" font-size="11" fill="var(--tx1)"></g>
+          </svg>
+          <div class="gfx-read">
+            <span>L <b id="rL">62.0</b> mm</span>
+            <span>W <b id="rW">40.0</b> mm</span>
+            <span>T <b id="rT">5.0</b> mm</span>
+            <span>mass <b id="rM">33.5</b> g</span>
+            <span>6061-T6</span>
+          </div>
+        </div>
+
+        <!-- panel -->
+        <div class="panel">
+          <div class="p-head">
+            <span class="mark" aria-hidden="true"></span>
+            <span class="nm">DATUM</span>
+            <button class="prov" id="provBtn" data-p="local" title="Click to switch provider">
+              <span class="d"></span><span id="provTxt">Local · Qwen14B</span>
+            </button>
+          </div>
+
+          <div class="ctx">
+            <div class="ctx-1">
+              <span class="doc">bracket_v3.SLDPRT</span>
+              <span class="sep">·</span><span class="cfg">Default</span>
+              <span class="sep">·</span><span class="cfg">mm</span>
+            </div>
+            <div class="pills">
+              <span class="pill ok">✓ checked out</span>
+              <span class="pill" id="rebuildPill">⟳ 0.4 s</span>
+              <span class="pill warn" id="healthPill">⚠ 2</span>
+            </div>
+          </div>
+
+          <!-- CHAT TAB -->
+          <div class="stream" id="stream" data-tab="chat"></div>
+
+          <div class="tabc" id="treeTab" data-tab="tree" hidden>
+            <div class="tree" id="treeList"></div>
+            <div class="thead">
+              <div class="stat"><b>14</b><span>features</span></div>
+              <div class="stat"><b>0.4 s</b><span>rebuild</span></div>
+              <div class="stat"><b>2</b><span>warnings</span></div>
+              <div class="stat"><b>0</b><span>errors</span></div>
+            </div>
+          </div>
+
+          <div class="tabc" id="parTab" data-tab="params" hidden>
+            <div class="prow">
+              <div class="plab"><span class="n">Length</span><span class="eq">global</span><span class="v" id="vL">62.0 mm</span></div>
+              <input type="range" id="sL" min="40" max="180" step="0.5" value="62" aria-label="Length in millimetres">
+            </div>
+            <div class="prow">
+              <div class="plab"><span class="n">Width</span><span class="eq">global</span><span class="v" id="vW">40.0 mm</span></div>
+              <input type="range" id="sW" min="36" max="130" step="0.5" value="40" aria-label="Width in millimetres">
+            </div>
+            <div class="prow">
+              <div class="plab"><span class="n">Thickness</span><span class="eq">stock enum</span><span class="v" id="vT">5.0 mm</span></div>
+              <input type="range" id="sT" min="3" max="12" step="1" value="5" aria-label="Thickness in millimetres">
+            </div>
+            <div class="prow">
+              <div class="plab"><span class="n">Mass</span><span class="eq">= V × 2.70 g/cm³</span><span class="v" id="vM">33.5 g</span></div>
+            </div>
+            <div class="pnote">
+              <b>Deterministic — no model involved</b>
+              Dragging writes <code>param.set_global</code> with deferred rebuild, then one rebuild on release. The whole drag is a single undo step. Width stops at 36 mm: below that the NEMA 17 bolt circle breaches the edge.
+            </div>
+          </div>
+
+          <div class="tabc" id="healthTab" data-tab="health" hidden>
+            <div class="find">
+              <div class="fh"><span class="sev w">Warning</span><span class="rid">std.sketch.fully-defined</span></div>
+              <p>Sketch1 is not fully defined — 2 degrees of freedom.</p>
+              <div class="why">Under-constrained sketches lose their intent when a driving dimension changes. Symmetry here is implied, not enforced.</div>
+              <div class="fa"><button class="btn det">Fix — add symmetric relation</button><button class="btn gho">Suppress…</button></div>
+            </div>
+            <div class="find">
+              <div class="fh"><span class="sev w">Warning</span><span class="rid">std.ref.fragile-face</span></div>
+              <p>CutExtrude1 is sketched on a model face of Boss-Extrude1.</p>
+              <div class="why">Face references break when upstream topology changes. Re-attaching to the Front Plane makes it survive edits.</div>
+              <div class="fa"><button class="btn det">Fix — reattach to Front Plane</button><button class="btn gho">Suppress…</button></div>
+            </div>
+            <div class="pnote">
+              <b>Built-in rule packs — free</b>
+              Runs on every rebuild, debounced 400 ms. Suppressions require a reason and an owner, and stay visible in review.
+            </div>
+          </div>
+
+          <div class="selchip" id="selChip">
+            <span>⬡</span><span>Face&lt;1&gt; of Boss-Extrude1 selected</span>
+            <button class="x" aria-label="Clear selection">✕</button>
+          </div>
+
+          <div class="comp" id="composer">
+            <div class="starters">
+              <button class="starter" data-p="simple">Add NEMA 17 mounting holes + R3 corner fillets</button>
+              <button class="starter" data-p="hard">Generate the full enclosure assembly and mate it</button>
+            </div>
+            <div class="cbox">
+              <textarea id="ta" rows="2" placeholder="Describe the change…"></textarea>
+              <div class="crow">
+                <button class="mode on" id="modeBtn">~ Edit</button>
+                <button class="iconb" title="Voice">◉</button>
+                <button class="iconb" title="Attach">⎘</button>
+                <button class="iconb" title="Capture viewport">▣</button>
+                <button class="send" id="sendBtn">Send ⏎</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="rail" id="rail">
+            <button class="on" data-t="chat">💬 Chat</button>
+            <button data-t="tree">⌗ Tree</button>
+            <button data-t="params">⚙ Params</button>
+            <button data-t="health">⚠ Health <span class="bdg">2</span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ PIPELINE ══════════ -->
+  <div class="sec">
+    <div class="sec-head"><span class="eyebrow">Execution</span><h2>Nothing mutates until step 7</h2></div>
+    <p class="sec-note">The order is the safety model. Six read-only stages run before a single API call touches your model, which is what makes this safe to hand to someone who doesn't trust AI yet.</p>
+    <div class="pipe">
+      <div class="step safe"><div class="n">01</div><div class="t">Context</div><div class="d">Tree, params, selection→PIDs, PDM lock, standards</div></div>
+      <div class="step safe"><div class="n">02</div><div class="t">Plan</div><div class="d">Grammar-constrained ops stream into the card</div></div>
+      <div class="step safe"><div class="n">03</div><div class="t">Validate</div><div class="d">Schema, DAG, policy, units</div></div>
+      <div class="step safe"><div class="n">04</div><div class="t">Resolve</div><div class="d">Every PID and query resolved read-only</div></div>
+      <div class="step safe"><div class="n">05</div><div class="t">Preview</div><div class="d">Targets highlighted in the live viewport</div></div>
+      <div class="step safe"><div class="n">06</div><div class="t">Dry run</div><div class="d">Scratch copy, auto for destructive plans</div></div>
+      <div class="step mut"><div class="n">07</div><div class="t">Apply</div><div class="d">One undo scope, graphics suspended</div></div>
+      <div class="step mut"><div class="n">08</div><div class="t">Verify</div><div class="d">Errors, mass Δ, interference, lint Δ</div></div>
+      <div class="step mut"><div class="n">09</div><div class="t">Settle</div><div class="d">Pass → log. Fail → auto-rollback</div></div>
+    </div>
+    <div class="pipe-key">
+      <span><i style="background:var(--ok)"></i> Read-only — cancel costs nothing</span>
+      <span><i style="background:var(--ai)"></i> Mutating — inside one undo group</span>
+    </div>
+  </div>
+
+  <!-- ══════════ SURFACE 2: STUDIO ══════════ -->
+  <div class="sec">
+    <div class="sec-head"><span class="eyebrow">Secondary surface</span><h2>Studio, for what won't fit in 380 px</h2></div>
+    <p class="sec-note">Same React bundle, different layout mode. Batch runs of four thousand files, skill authoring, index browsing, and drawing queues need room. It survives a SOLIDWORKS crash because it lives in a separate process.</p>
+
+    <div class="app">
+      <div class="app-bar">
+        <span class="mark" style="width:15px;height:15px;border-width:1.25px;" aria-hidden="true"></span>
+        <span class="sw">DATUM Studio</span><span>bracket_v3.SLDPRT</span>
+        <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:11px;">
+          <i style="width:7px;height:7px;border-radius:50%;background:var(--viz);display:block;"></i> Pro · Opus 5
+        </span>
+      </div>
+      <div class="studio">
+        <div class="st-rail">
+          <i title="Chat">💬</i><i class="on" title="Model Explorer">⌗</i><i title="Parameters">⚙</i>
+          <i title="Skills">⚡</i><i title="Batch">⧉</i><i title="Drawings">▤</i>
+          <i title="Health">⚠</i><i title="Reuse Index">⌕</i><i title="History">⏱</i>
+        </div>
+
+        <div class="st-col">
+          <div class="st-h">Model Explorer</div>
+          <div class="tree" id="stTree"></div>
+        </div>
+
+        <div class="st-col st-c">
+          <div class="st-view">
+            <svg viewBox="0 0 300 190" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Isometric preview of the mounting plate">
+              <rect width="300" height="190" fill="url(#gr)"/>
+              <g transform="translate(150,96)">
+                <path d="M-78,-14 L0,-52 L78,-14 L0,24 Z" fill="color-mix(in srgb, var(--ai) 16%, transparent)" stroke="var(--tx0)" stroke-width="1.4"/>
+                <path d="M-78,-14 L-78,4 L0,42 L0,24 Z" fill="color-mix(in srgb, var(--ai) 26%, transparent)" stroke="var(--tx0)" stroke-width="1.4"/>
+                <path d="M78,-14 L78,4 L0,42 L0,24 Z" fill="color-mix(in srgb, var(--ai) 9%, transparent)" stroke="var(--tx0)" stroke-width="1.4"/>
+                <ellipse cx="-38" cy="-14" rx="6" ry="3" fill="var(--ground)" stroke="var(--tx1)" stroke-width="1"/>
+                <ellipse cx="38" cy="-14" rx="6" ry="3" fill="var(--ground)" stroke="var(--tx1)" stroke-width="1"/>
+                <ellipse cx="0" cy="-33" rx="6" ry="3" fill="var(--ground)" stroke="var(--tx1)" stroke-width="1"/>
+                <ellipse cx="0" cy="5" rx="6" ry="3" fill="var(--ground)" stroke="var(--tx1)" stroke-width="1"/>
+                <ellipse cx="0" cy="-14" rx="17" ry="8" fill="var(--ground)" stroke="var(--tx1)" stroke-width="1.1"/>
+              </g>
+              <text x="12" y="18" font-family="Cascadia Code, Consolas, monospace" font-size="9" fill="var(--tx2)" letter-spacing="1.2">VIEWPORT MIRROR · 3 fps</text>
+            </svg>
+          </div>
+          <div class="st-params">
+            <div class="st-p"><span class="t">Length</span><span class="b"><i style="width:31%"></i></span><span class="v">62.0</span></div>
+            <div class="st-p"><span class="t">Width</span><span class="b"><i style="width:22%"></i></span><span class="v">40.0</span></div>
+            <div class="st-p"><span class="t">Thick</span><span class="b"><i style="width:18%"></i></span><span class="v">5.0</span></div>
+            <div class="st-p"><span class="t">Mass</span><span class="b"><i style="width:44%;background:var(--tx2)"></i></span><span class="v">33.5 g</span></div>
+          </div>
+        </div>
+
+        <div class="st-r">
+          <div class="st-h">Copilot</div>
+          <div class="mini">
+            <div class="mh">3 similar parts already exist</div>
+            <div class="mt">BRK-0142 · BRK-0177 · BRK-0203 — matched on geometry and description. Insert one instead of modelling?</div>
+          </div>
+          <div class="mini" style="border-color:color-mix(in srgb, var(--det) 34%, var(--hairline));">
+            <div class="mh" style="color:var(--det)">⚡ ACME Mounting Plate v2.1.0</div>
+            <div class="mt">Deterministic skill · 340 runs · tests passing. Runs free, offline, no model call.</div>
+          </div>
+          <div class="mini">
+            <div class="mh">Batch — 34 affected files</div>
+            <div class="mt">Impact analysis found 34 documents referencing this part. Dry run first?</div>
+          </div>
+        </div>
+
+        <div class="st-log">
+          <span>⏱ OP LOG</span>
+          <span>14:22:07 <b>✓</b> Fillet2 applied · 1.8 s · mass −2.7%</span>
+          <span>14:19:44 <b>✓</b> Property fill · 12 files</span>
+          <span>14:16:02 <b>✓</b> Flat pattern DXF · 8 files</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ TIERS ══════════ -->
+  <div class="sec">
+    <div class="sec-head"><span class="eyebrow">Access</span><h2>Free is the product. Pro is the accelerant.</h2></div>
+    <p class="sec-note">Everything downstream of the planner is deterministic C# calling the SOLIDWORKS API. The model only authors the plan — so the executor, skills, batch, linter, drawings, and undo work with no model at all.</p>
+
+    <div class="cards3">
+      <div class="tier">
+        <div class="tt"><h3>Free</h3><span class="px">forever · offline</span></div>
+        <p class="lead">A complete deterministic CAD automation tool that happens to run a local model. No account, no internet, no egress.</p>
+        <ul>
+          <li>Full operation executor with single-keystroke undo</li>
+          <li>Parameter Inspector, Variant Matrix, goal seek</li>
+          <li>Skills — run, author, version, test</li>
+          <li>Batch Runner up to 25 targets</li>
+          <li>Design Linter + built-in standards packs</li>
+          <li>Drawing Autopilot from templates</li>
+          <li>Local model planner, grammar-constrained</li>
+          <li>Local part-reuse index</li>
+        </ul>
+      </div>
+      <div class="tier">
+        <div class="tt"><h3>Free + your own key</h3><span class="px">you pay the model vendor</span></div>
+        <p class="lead">Paste an Anthropic, OpenAI, or Google key. We take no cut and add no markup — this is frontier reasoning on the free tier.</p>
+        <ul>
+          <li>Everything in Free</li>
+          <li>Frontier planning quality</li>
+          <li>Vision inputs — sketch photos, marked-up screenshots</li>
+          <li>Keys stored in Windows Credential Manager, never ours</li>
+        </ul>
+      </div>
+      <div class="tier hi">
+        <div class="tt"><h3>Pro</h3><span class="px">maximum</span></div>
+        <p class="lead">Managed frontier models and everything that only works at org scale.</p>
+        <ul>
+          <li>Claude Opus 5 planning, Sonnet 5 inline — no keys to manage</li>
+          <li>Agent loop: plan → execute → verify → self-repair</li>
+          <li>Assembly generation and mating strategy</li>
+          <li>Unlimited + scheduled batch, multi-instance workers</li>
+          <li>Org-wide reuse index across PDM and network drives</li>
+          <li>Full PDM/PLM workflow automation</li>
+          <li>AI-authored rules from your standards documents</li>
+          <li>Team skill library, audit export, SSO, GPO deployment</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ VOCABULARY ══════════ -->
+  <div class="sec">
+    <div class="sec-head"><span class="eyebrow">Operation IR v1.4</span><h2>A closed vocabulary the model cannot escape</h2></div>
+    <p class="sec-note">The planner emits typed operations from this list — never code, never raw API calls. It cannot invent an operation, so it cannot corrupt a model in a way we didn't anticipate. Plans are diffable, replayable, hand-editable, and shared by the AI path and the free deterministic path alike.</p>
+    <div class="vocab">
+      <div class="vg"><h4>sketch.*</h4><p>create · line · arc · circle · rectangle · slot · spline · polygon · text · offset · trim · convert_entities · mirror · pattern · add_relation · dimension · fully_define</p></div>
+      <div class="vg"><h4>feature.*</h4><p>extrude · extrude_cut · revolve · sweep · loft · boundary · fillet · chamfer · shell · draft · rib · dome · wrap · hole_wizard · thread · pattern_linear · pattern_circular · pattern_fill · mirror · combine · split · reference_plane</p></div>
+      <div class="vg"><h4>feature.edit.*</h4><p>set_params · rename · suppress · reorder · delete · rollback_to · reattach_reference · change_end_condition · flip_direction</p></div>
+      <div class="vg d"><h4>param.*</h4><p>set_dimension · set_global · add_global · add_equation · edit_equation · link_dimension · goal_seek</p></div>
+      <div class="vg d"><h4>config.*</h4><p>create · derive · activate · set_dimension · set_suppression · set_property · design_table_create · family_table_update</p></div>
+      <div class="vg"><h4>sheetmetal.*</h4><p>base_flange · edge_flange · miter_flange · hem · jog · closed_corner · corner_relief · unfold · fold · flat_pattern · set_bend_table · export_dxf</p></div>
+      <div class="vg"><h4>asm.*</h4><p>insert_component · replace_component · mate · mate_by_reference · fasten · pattern_component · mirror_component · set_state · smart_fasteners · flexible_subassembly</p></div>
+      <div class="vg"><h4>drw.*</h4><p>create_from_model · add_view_standard3 · add_view_section · add_view_detail · add_view_flat_pattern · import_model_items · arrange_dimensions · add_gtol · auto_balloon · add_bom · fill_title_block · export</p></div>
+      <div class="vg d"><h4>doc.*</h4><p>new_from_template · save_as · set_material · set_property · set_properties_bulk · set_units · export · pack_and_go · rebuild · capture_screenshot</p></div>
+      <div class="vg"><h4>pdm.*</h4><p>get_latest · check_out · check_in · undo_check_out · set_variable · change_state · where_used · get_history</p></div>
+      <div class="vg q"><h4>query.* — read-only</h4><p>mass_properties · bounding_box · measure · check_interference · check_clearance · check_draft · check_thickness · list_features · get_bom · where_used · rebuild_errors · compare_documents</p></div>
+      <div class="vg x"><h4>script.macro — escape hatch</h4><p>Generated VBA or C# for anything outside the vocabulary. Always shown in full, always dry-run first, always explicitly approved, disabled by default under enterprise policy.</p></div>
+    </div>
+  </div>
+
+  <!-- ══════════ INPUTS ══════════ -->
+  <div class="sec">
+    <div class="sec-head"><span class="eyebrow">Composer</span><h2>Twenty ways to say what you want</h2></div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th style="width:26%">Input</th><th style="width:37%">In practice</th><th>How the composer takes it</th></tr></thead>
+        <tbody>
+          <tr><td><b>Natural language</b></td><td>"Add a 6 mm fillet to all vertical edges of the boss"</td><td>Main field. <code>/</code> commands, <code>@</code> references</td></tr>
+          <tr><td><b>Live selection</b><small>implicit, always on</small></td><td>Pre-select 3 faces, type "shell these to 2 mm"</td><td>Selection chip above the composer, resolved to PIDs</td></tr>
+          <tr><td><b>Voice</b></td><td>Hands on the mouse, dictate the edit</td><td>Push-to-talk <code>Ctrl+Space</code>, editable transcript</td></tr>
+          <tr><td><b>Direct numeric</b><small>zero tokens, zero cost</small></td><td><code>@Length = 62</code></td><td>Parsed deterministically, bypasses the planner entirely</td></tr>
+          <tr><td><b>Constraints</b></td><td>"Fits 120×80×40, min wall 2 mm, under 300 g"</td><td><code>/constrain</code> — pinned to the document, enforced by the linter</td></tr>
+          <tr><td><b>Napkin sketch photo</b></td><td>Phone photo of a hand sketch with dimensions</td><td>Drag, paste, or capture → dimensioned sketch plan</td></tr>
+          <tr><td><b>Marked-up screenshot</b></td><td>Red arrows and "make this 15" on the model</td><td>Capture viewport → built-in annotator → ray-cast to PIDs</td></tr>
+          <tr><td><b>2D drawing</b></td><td>Legacy PDF or DWG to be remodelled</td><td>Extraction preview of views and dimensions first</td></tr>
+          <tr><td><b>Reference 3D file</b></td><td>"Like this one, but 30 mm longer"</td><td>Drag STEP/SLDPRT → <code>@ref</code> token with thumbnail</td></tr>
+          <tr><td><b>Spreadsheet</b></td><td>Size table for 40 variants</td><td>Column mapper → Variant Matrix → configurations</td></tr>
+          <tr><td><b>Datasheet PDF</b></td><td>Motor datasheet → mounting pattern</td><td>Extracted parameter table shown for confirmation</td></tr>
+          <tr><td><b>Legacy macro</b></td><td>A <code>.swp</code> written by someone who left</td><td>Drag → parse → convert to a typed, tested Skill</td></tr>
+          <tr><td><b>Recorded actions</b></td><td>"Record me doing it once"</td><td>Command capture → generalised Skill draft</td></tr>
+          <tr><td><b>Standards documents</b></td><td>Your drafting standard PDF</td><td>Ingested as rules the linter enforces</td></tr>
+          <tr><td><b>Target sets</b></td><td>"All parts in \Projects\X released after June"</td><td>Batch picker: folder, glob, vault query, BOM paste</td></tr>
+          <tr><td><b>Tree drag</b></td><td>Drag <code>Fillet3</code> out of the SOLIDWORKS tree</td><td>Becomes a PID-bound <code>@Fillet3</code> token</td></tr>
+          <tr><td><b>Prior transcript</b></td><td>"Do what you did to the last bracket"</td><td>Replay a stored plan against a new target</td></tr>
+          <tr><td><b>Right-click</b></td><td>Right-click a face in the graphics area</td><td>Ask DATUM · Edit with DATUM · Lint this</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ══════════ REALTIME ══════════ -->
+  <div class="sec">
+    <div class="sec-head"><span class="eyebrow">Realtime</span><h2>What updates, from where, how fast</h2></div>
+    <p class="sec-note">SOLIDWORKS notifications fire on the single-threaded apartment and must return in under a millisecond, so handlers only stamp a delta into a ring buffer. A background pump coalesces at 30 Hz and ships it over a named pipe to the WebSocket broadcast. If the stream stalls, every live element visibly desaturates — the UI never presents stale data as current.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th style="width:30%">Element</th><th style="width:42%">SOLIDWORKS source</th><th>Target</th></tr></thead>
+        <tbody>
+          <tr><td>Selection chip</td><td><code>UserSelectionPostNotify</code></td><td class="c">&lt; 100 ms</td></tr>
+          <tr><td>Feature tree mirror</td><td><code>AddItemNotify</code> · <code>DeleteItemNotify</code> · <code>RenameItemNotify</code></td><td class="c">&lt; 150 ms</td></tr>
+          <tr><td>Rebuild badge and timing</td><td><code>RegenPostNotify2</code></td><td class="c">&lt; 100 ms</td></tr>
+          <tr><td>Parameter values</td><td><code>RegenPostNotify2</code> + dimension change</td><td class="c">&lt; 150 ms</td></tr>
+          <tr><td>Mass, bounding box, CoG</td><td><code>IMassProperty</code>, recomputed async on rebuild</td><td class="c">&lt; 400 ms</td></tr>
+          <tr><td>Linter findings</td><td>debounced 400 ms after rebuild</td><td class="c">&lt; 800 ms</td></tr>
+          <tr><td>PDM lock state</td><td>PDM hooks + 30 s poll fallback</td><td class="c">&lt; 1 s</td></tr>
+          <tr><td>Viewport mirror</td><td>throttled JPEG on view idle</td><td class="c">2–4 fps</td></tr>
+          <tr><td>Plan operations</td><td>token stream from the provider</td><td class="c">first op &lt; 1.5 s</td></tr>
+          <tr><td>Connection health</td><td>named-pipe heartbeat</td><td class="c">drop &lt; 2 s</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span><strong style="color:var(--tx0)">Specification</strong> — <code>docs/01-research.md</code> · <code>02-architecture.md</code> · <code>03-product-spec.md</code> · <code>04-ux-spec.md</code></span>
+    <span>Kernel: .NET Framework 4.8 in-process add-in · Orchestrator: .NET 8 · UI: React in WebView2</span>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ── theme toggle ── */
+  var tb = document.getElementById('themeBtn');
+  tb.addEventListener('click', function(){
+    var r = document.documentElement;
+    var cur = r.getAttribute('data-theme');
+    if(!cur){ cur = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; }
+    r.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+  });
+
+  /* ── parametric viewport ── */
+  var S = 2, CX = 230, CY = 180, BOLT = 15.5;
+  var st = { L:62, W:40, T:5, holes:false, fillet:false };
+
+  var plate = document.getElementById('plate'),
+      filletHi = document.getElementById('filletHi'),
+      slot = document.getElementById('slot'),
+      holesG = document.getElementById('holes'),
+      dimsG = document.getElementById('dims');
+
+  function mass(){
+    var v = st.L*st.W*st.T;
+    v -= Math.PI*Math.pow(1.7,2)*st.T*(st.holes?4:0);
+    v -= (20*8 + Math.PI*16)*st.T;
+    return Math.max(0, v/1000*2.70);
+  }
+
+  function draw(){
+    var w = st.L*S, h = st.W*S, x = CX-w/2, y = CY-h/2, r = st.fillet ? 3*S : 0;
+    [plate, filletHi].forEach(function(el){
+      el.setAttribute('x',x); el.setAttribute('y',y);
+      el.setAttribute('width',w); el.setAttribute('height',h); el.setAttribute('rx',r);
+    });
+    slot.setAttribute('x', CX-20); slot.setAttribute('y', CY-8);
+
+    holesG.setAttribute('opacity', st.holes ? '1' : '0');
+    if(st.holes && !holesG.dataset.built){
+      var out = '';
+      [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(function(p){
+        var hx = CX + p[0]*BOLT*S, hy = CY + p[1]*BOLT*S;
+        out += '<circle cx="'+hx+'" cy="'+hy+'" r="'+(1.7*S)+'" fill="var(--ground)" stroke="var(--tx0)" stroke-width="1.2"/>'
+             + '<line x1="'+(hx-6)+'" y1="'+hy+'" x2="'+(hx+6)+'" y2="'+hy+'" stroke="var(--tx2)" stroke-width="0.8"/>'
+             + '<line x1="'+hx+'" y1="'+(hy-6)+'" x2="'+hx+'" y2="'+(hy+6)+'" stroke="var(--tx2)" stroke-width="0.8"/>';
+      });
+      holesG.innerHTML = out; holesG.dataset.built = '1';
+    }
+
+    var dy = y+h+40, dx = x-42;
+    dimsG.innerHTML =
+      '<line x1="'+x+'" y1="'+(y+h+6)+'" x2="'+x+'" y2="'+(dy+8)+'" stroke="var(--tx2)" stroke-width="0.7"/>'+
+      '<line x1="'+(x+w)+'" y1="'+(y+h+6)+'" x2="'+(x+w)+'" y2="'+(dy+8)+'" stroke="var(--tx2)" stroke-width="0.7"/>'+
+      '<line x1="'+x+'" y1="'+dy+'" x2="'+(x+w)+'" y2="'+dy+'" stroke="var(--tx2)" stroke-width="0.9" marker-start="url(#arS)" marker-end="url(#ar)"/>'+
+      '<rect x="'+(CX-24)+'" y="'+(dy-9)+'" width="48" height="17" fill="var(--ground)"/>'+
+      '<text x="'+CX+'" y="'+(dy+4)+'" text-anchor="middle">'+st.L.toFixed(1)+'</text>'+
+      '<line x1="'+(x-6)+'" y1="'+y+'" x2="'+(dx-8)+'" y2="'+y+'" stroke="var(--tx2)" stroke-width="0.7"/>'+
+      '<line x1="'+(x-6)+'" y1="'+(y+h)+'" x2="'+(dx-8)+'" y2="'+(y+h)+'" stroke="var(--tx2)" stroke-width="0.7"/>'+
+      '<line x1="'+dx+'" y1="'+y+'" x2="'+dx+'" y2="'+(y+h)+'" stroke="var(--tx2)" stroke-width="0.9" marker-start="url(#arS)" marker-end="url(#ar)"/>'+
+      '<rect x="'+(dx-17)+'" y="'+(CY-9)+'" width="34" height="17" fill="var(--ground)"/>'+
+      '<text x="'+dx+'" y="'+(CY+4)+'" text-anchor="middle">'+st.W.toFixed(1)+'</text>'+
+      (st.fillet ? '<text x="'+(x+w+10)+'" y="'+(y-6)+'" fill="var(--tx1)">R3</text>' : '')+
+      (st.holes ? '<text x="'+(CX+BOLT*S+12)+'" y="'+(CY-BOLT*S-8)+'" fill="var(--tx1)">4× ⌀3.4</text>' : '');
+
+    document.getElementById('rL').textContent = st.L.toFixed(1);
+    document.getElementById('rW').textContent = st.W.toFixed(1);
+    document.getElementById('rT').textContent = st.T.toFixed(1);
+    document.getElementById('rM').textContent = mass().toFixed(1);
+    document.getElementById('vL').textContent = st.L.toFixed(1)+' mm';
+    document.getElementById('vW').textContent = st.W.toFixed(1)+' mm';
+    document.getElementById('vT').textContent = st.T.toFixed(1)+' mm';
+    document.getElementById('vM').textContent = mass().toFixed(1)+' g';
+  }
+
+  ['L','W','T'].forEach(function(k){
+    var el = document.getElementById('s'+k);
+    el.addEventListener('input', function(){ st[k] = parseFloat(el.value); draw(); });
+  });
+  draw();
+
+  /* ── geometry highlight on op hover ── */
+  function highlight(kind, on){
+    if(kind === 'fillet'){
+      filletHi.setAttribute('opacity', on ? '1' : '0');
+    } else if(kind === 'hole'){
+      holesG.setAttribute('opacity', on ? '1' : (st.holes ? '1' : '0'));
+      if(!holesG.dataset.built && on){ var keep = st.holes; st.holes = true; draw(); st.holes = keep; }
+      holesG.querySelectorAll('circle').forEach(function(c){
+        c.setAttribute('stroke', on ? 'var(--viz)' : 'var(--tx0)');
+        c.setAttribute('stroke-width', on ? '3' : '1.2');
+      });
+    }
+  }
+
+  /* ── tabs ── */
+  var rail = document.getElementById('rail');
+  rail.addEventListener('click', function(e){
+    var b = e.target.closest('button[data-t]'); if(!b) return;
+    rail.querySelectorAll('button').forEach(function(x){ x.classList.toggle('on', x === b); });
+    var t = b.dataset.t;
+    document.getElementById('stream').hidden = t !== 'chat';
+    document.getElementById('treeTab').hidden = t !== 'tree';
+    document.getElementById('parTab').hidden = t !== 'params';
+    document.getElementById('healthTab').hidden = t !== 'health';
+    document.getElementById('composer').style.display = (t === 'chat') ? '' : 'none';
+    document.getElementById('selChip').style.display = (t === 'chat') ? '' : 'none';
+  });
+
+  /* ── feature tree ── */
+  var TREE = [
+    ['▸','⌗','Annotations',''],
+    ['','◫','Material &lt;6061-T6&gt;',''],
+    ['','▭','Front Plane',''],
+    ['','▭','Top Plane',''],
+    ['','▭','Right Plane',''],
+    ['▾','⬢','Boss-Extrude1',''],
+    ['ind','✎','Sketch1','w'],
+    ['','⬡','CutExtrude1','w'],
+    ['','◧','Shell1',''],
+    ['','⬚','LPattern1','']
+  ];
+  function renderTree(el){
+    el.innerHTML = TREE.map(function(r){
+      var tag = r[3] === 'w' ? '<span class="tag w">not defined</span>'
+              : r[3] === 'e' ? '<span class="tag e">error</span>' : '<span></span>';
+      return '<div class="tnode'+(r[0]==='ind'?' ind':'')+'">'
+           + '<span class="ic">'+(r[0]==='ind'?'':r[0])+'</span>'
+           + '<span class="ic">'+r[1]+'</span>'
+           + '<span class="lb">'+r[2]+'</span>'+tag+'</div>';
+    }).join('');
+  }
+  renderTree(document.getElementById('treeList'));
+  renderTree(document.getElementById('stTree'));
+
+  /* ── provider switch ── */
+  var PROV = [
+    {k:'local', t:'Local · Qwen14B'},
+    {k:'byo',   t:'BYO · Claude Sonnet 5'},
+    {k:'pro',   t:'Pro · Claude Opus 5'}
+  ];
+  var pi = 0, provBtn = document.getElementById('provBtn');
+  provBtn.addEventListener('click', function(){
+    pi = (pi+1) % PROV.length;
+    provBtn.dataset.p = PROV[pi].k;
+    document.getElementById('provTxt').textContent = PROV[pi].t;
+  });
+
+  /* ── mode switch ── */
+  var MODES = [['~ Edit','edit'],['+ Build','build'],['? Ask','ask'],['⧉ Batch','batch']];
+  var mi = 0, modeBtn = document.getElementById('modeBtn');
+  modeBtn.addEventListener('click', function(){
+    mi = (mi+1) % MODES.length;
+    modeBtn.textContent = MODES[mi][0];
+    modeBtn.className = 'mode on ' + MODES[mi][1];
+  });
+
+  /* ── conversation engine ── */
+  var stream = document.getElementById('stream'), ta = document.getElementById('ta');
+  function push(html){
+    var d = document.createElement('div');
+    d.className = 'rise'; d.innerHTML = html;
+    stream.appendChild(d); stream.scrollTop = stream.scrollHeight;
+    return d;
+  }
+  function reset(){
+    stream.innerHTML = '';
+    push('<div class="card"><div class="c-body" style="font-size:12.5px;color:var(--tx1)">'
+       + '<strong style="color:var(--tx0);display:block;margin-bottom:5px;font-size:13px;">Ready — bracket_v3.SLDPRT</strong>'
+       + 'This part has 2 unresolved warnings and no NEMA mounting pattern. Try a starter below, or select geometry in the graphics area and describe the change.'
+       + '</div></div>');
+  }
+
+  var OPS = [
+    { k:'hole', ic:'⬡', nm:'Hole Wizard',
+      pr:'M3 clearance ×4 · normal fit · through all',
+      tg:'⟶ Face&lt;1&gt; of Boss-Extrude1', badge:'topology-change' },
+    { k:'fillet', ic:'◟', nm:'Fillet',
+      pr:'Constant R3 · propagate to tangent faces',
+      tg:'⟶ 4 corner edges', badge:null }
+  ];
+
+  function planCard(){
+    var rows = OPS.map(function(o,i){
+      return '<div class="op" data-k="'+o.k+'" data-i="'+i+'">'
+        + '<span class="ic">'+o.ic+'</span>'
+        + '<span><span class="nm">'+o.nm+'</span>'
+        + '<span class="pr">'+o.pr+'</span>'
+        + '<span class="tg">'+o.tg+'</span>'
+        + (o.badge ? '<span class="badge">● '+o.badge+'</span>' : '')
+        + '</span><span class="bar"><i></i></span></div>';
+    }).join('');
+
+    return '<div class="card plan" id="planCard">'
+      + '<div class="c-strip"><span>⬤</span><span id="planState">Plan · ready</span><span class="cnt">2 ops</span></div>'
+      + '<div class="c-body">'
+      + '<div class="intent">Adds a NEMA 17 mounting pattern and R3 corner fillets to the selected face.</div>'
+      + '<div class="assume"><h5>⚠ Assumptions · 2</h5><ul>'
+      + '<li>M3 clearance holes, normal fit — NEMA 17 is a 31 mm square bolt circle</li>'
+      + '<li>R3 chosen to match the existing radius on Boss-Extrude1</li>'
+      + '</ul></div>'
+      + '<div class="ops">'+rows+'</div>'
+      + '<div class="diff"><h5>Predicted tree diff</h5>'
+      + '<div>Boss-Extrude1</div><div class="add">+ M3 Clearance Hole1</div><div class="add">+ Fillet2</div></div>'
+      + '</div>'
+      + '<div class="c-foot" id="planFoot">'
+      + '<button class="btn gho">Dry run ▸</button>'
+      + '<button class="btn gho">⚡ Save as Skill</button>'
+      + '<button class="btn pri" id="applyBtn">Apply<span class="k">⏎</span></button>'
+      + '</div></div>';
+  }
+
+  function resultCard(){
+    var m0 = mass();
+    st.holes = true; st.fillet = true; draw();
+    var m1 = mass(), d = ((m1-m0)/m0*100);
+    return '<div class="card res">'
+      + '<div class="c-strip"><span>✓</span><span>Applied · 1.8 s</span><span class="cnt">2 / 2 ops</span></div>'
+      + '<div class="c-body">'
+      + '<div class="verify">'
+      + '<div class="vrow ok"><span class="g">✓</span><span>Rebuild errors</span><span class="v">0 → 0</span></div>'
+      + '<div class="vrow ok"><span class="g">✓</span><span>Mass</span><span class="v">'+m0.toFixed(1)+' → '+m1.toFixed(1)+' g · '+d.toFixed(1)+'%</span></div>'
+      + '<div class="vrow ok"><span class="g">✓</span><span>Interference</span><span class="v">none</span></div>'
+      + '<div class="vrow warn"><span class="g">⚠</span><span>Linter</span><span class="v">2 → 3 · +1 new</span></div>'
+      + '<div class="vsub"><span>Hole1 sketch not fully defined</span><button>Fix ▸</button></div>'
+      + '</div></div>'
+      + '<div class="c-foot">'
+      + '<button class="btn" id="undoBtn">↺ Undo</button>'
+      + '<button class="btn gho">⟲ Restore snapshot</button>'
+      + '<button class="btn gho">Explain</button>'
+      + '</div></div>';
+  }
+
+  function capCard(){
+    return '<div class="card cap">'
+      + '<div class="c-strip"><span>⚠</span><span>Beyond your local model</span></div>'
+      + '<div class="c-body" style="font-size:12.5px;color:var(--tx1);line-height:1.5">'
+      + '<p style="color:var(--tx0);margin-bottom:7px">14 dependent steps and assembly mating strategy.</p>'
+      + 'Qwen14B completed 6 of 14 in the dry run. Nothing has been changed.'
+      + '</div>'
+      + '<div class="c-foot" style="flex-wrap:wrap;gap:6px">'
+      + '<button class="btn">Run the 6 it got right</button>'
+      + '<button class="btn">Use my API key</button>'
+      + '<button class="btn" style="border-color:var(--viz);color:var(--viz)">Try Pro free</button>'
+      + '</div></div>';
+  }
+
+  function send(kind, text){
+    push('<div class="msg-u">'+text+'<br><span class="ref">⬡ Face&lt;1&gt; of Boss-Extrude1</span></div>');
+
+    if(kind === 'hard' && PROV[pi].k === 'local'){
+      setTimeout(function(){ push(capCard()); }, 600);
+      return;
+    }
+    if(kind === 'hard'){
+      setTimeout(function(){
+        push('<div class="card"><div class="c-body" style="font-size:12.5px;color:var(--tx1)">'
+          + '<strong style="color:var(--tx0);display:block;margin-bottom:5px;font-size:13px;">Agent loop — 6 stages</strong>'
+          + 'Enclosure structure, 12 components, mating strategy, interference pass, then self-repair. '
+          + 'Assembly generation is a Pro capability; this prototype stops here.</div></div>');
+      }, 600);
+      return;
+    }
+
+    var card = push(planCard());
+    var pc = card.querySelector('#planCard');
+    var stateEl = pc.querySelector('#planState');
+    stateEl.textContent = 'Plan · streaming';
+    stateEl.parentElement.classList.add('pulsing');
+    setTimeout(function(){
+      stateEl.textContent = 'Plan · ready';
+      stateEl.parentElement.classList.remove('pulsing');
+    }, 900);
+
+    pc.querySelectorAll('.op').forEach(function(row){
+      row.addEventListener('mouseenter', function(){ highlight(row.dataset.k, true); });
+      row.addEventListener('mouseleave', function(){ highlight(row.dataset.k, false); });
+    });
+
+    pc.querySelector('#applyBtn').addEventListener('click', function(){
+      var foot = pc.querySelector('#planFoot');
+      foot.innerHTML = '<span style="font-size:12px;color:var(--tx1)">Applying — graphics suspended, one undo scope…</span>';
+      stateEl.textContent = 'Plan · running';
+      var bars = pc.querySelectorAll('.bar i'), n = 0;
+      var iv = setInterval(function(){
+        if(n < bars.length){ bars[n].style.width = '100%'; n++; }
+        else{
+          clearInterval(iv);
+          pc.remove();
+          var res = push(resultCard());
+          res.querySelector('#undoBtn').addEventListener('click', function(){
+            st.holes = false; st.fillet = false; draw();
+            res.remove();
+            push('<div class="card"><div class="c-body" style="font-size:12.5px;color:var(--tx1)">'
+              + '↺ <strong style="color:var(--tx0)">Undone.</strong> Model restored to its pre-plan state — '
+              + 'feature count and mass properties verified equal. Snapshot retained for 30 days.</div></div>');
+          });
+        }
+      }, 620);
+    });
+  }
+
+  document.querySelectorAll('.starter').forEach(function(b){
+    b.addEventListener('click', function(){ send(b.dataset.p, b.textContent); });
+  });
+  document.getElementById('sendBtn').addEventListener('click', function(){
+    var v = ta.value.trim(); if(!v) return;
+    ta.value = ''; send('simple', v);
+  });
+  ta.addEventListener('keydown', function(e){
+    if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); document.getElementById('sendBtn').click(); }
+  });
+
+  reset();
+})();
+</script>

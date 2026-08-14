@@ -1,0 +1,35 @@
+// vite.config.ts
+import { defineConfig } from "file:///sessions/gallant-tender-tesla/mnt/Application/ui/node_modules/vite/dist/node/index.js";
+import react from "file:///sessions/gallant-tender-tesla/mnt/Application/ui/node_modules/@vitejs/plugin-react/dist/index.js";
+var vite_config_default = defineConfig({
+  plugins: [react()],
+  // Relative base: the same bundle is served from the WebView2 virtual host
+  // (https://datum.local/) and from the orchestrator's static file middleware.
+  base: "./",
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    target: "chrome120",
+    // WebView2 evergreen — no need to down-level
+    sourcemap: false,
+    chunkSizeWarningLimit: 700
+  },
+  server: {
+    port: 5273,
+    strictPort: true
+  },
+  test: {
+    // jsdom because persistence touches localStorage and the exporters touch Blob/URL.
+    environment: "jsdom",
+    include: ["src/**/*.test.ts"],
+    restoreMocks: true,
+    // Loads the WASM boolean engine before any test. Without it the suite measures the BSP
+    // fallback rather than the engine the application actually ships.
+    setupFiles: ["./src/test-setup.ts"],
+    testTimeout: 3e4
+  }
+});
+export {
+  vite_config_default as default
+};
+//# sourceMappingURL=data:application/json;base64,ewogICJ2ZXJzaW9uIjogMywKICAic291cmNlcyI6IFsidml0ZS5jb25maWcudHMiXSwKICAic291cmNlc0NvbnRlbnQiOiBbImNvbnN0IF9fdml0ZV9pbmplY3RlZF9vcmlnaW5hbF9kaXJuYW1lID0gXCIvc2Vzc2lvbnMvZ2FsbGFudC10ZW5kZXItdGVzbGEvbW50L0FwcGxpY2F0aW9uL3VpXCI7Y29uc3QgX192aXRlX2luamVjdGVkX29yaWdpbmFsX2ZpbGVuYW1lID0gXCIvc2Vzc2lvbnMvZ2FsbGFudC10ZW5kZXItdGVzbGEvbW50L0FwcGxpY2F0aW9uL3VpL3ZpdGUuY29uZmlnLnRzXCI7Y29uc3QgX192aXRlX2luamVjdGVkX29yaWdpbmFsX2ltcG9ydF9tZXRhX3VybCA9IFwiZmlsZTovLy9zZXNzaW9ucy9nYWxsYW50LXRlbmRlci10ZXNsYS9tbnQvQXBwbGljYXRpb24vdWkvdml0ZS5jb25maWcudHNcIjsvLy8gPHJlZmVyZW5jZSB0eXBlcz1cInZpdGVzdFwiIC8+XHJcbmltcG9ydCB7IGRlZmluZUNvbmZpZyB9IGZyb20gJ3ZpdGUnO1xyXG5pbXBvcnQgcmVhY3QgZnJvbSAnQHZpdGVqcy9wbHVnaW4tcmVhY3QnO1xyXG5cclxuZXhwb3J0IGRlZmF1bHQgZGVmaW5lQ29uZmlnKHtcclxuICBwbHVnaW5zOiBbcmVhY3QoKV0sXHJcbiAgLy8gUmVsYXRpdmUgYmFzZTogdGhlIHNhbWUgYnVuZGxlIGlzIHNlcnZlZCBmcm9tIHRoZSBXZWJWaWV3MiB2aXJ0dWFsIGhvc3RcclxuICAvLyAoaHR0cHM6Ly9kYXR1bS5sb2NhbC8pIGFuZCBmcm9tIHRoZSBvcmNoZXN0cmF0b3IncyBzdGF0aWMgZmlsZSBtaWRkbGV3YXJlLlxyXG4gIGJhc2U6ICcuLycsXHJcbiAgYnVpbGQ6IHtcclxuICAgIG91dERpcjogJ2Rpc3QnLFxyXG4gICAgZW1wdHlPdXREaXI6IHRydWUsXHJcbiAgICB0YXJnZXQ6ICdjaHJvbWUxMjAnLCAvLyBXZWJWaWV3MiBldmVyZ3JlZW4gXHUyMDE0IG5vIG5lZWQgdG8gZG93bi1sZXZlbFxyXG4gICAgc291cmNlbWFwOiBmYWxzZSxcclxuICAgIGNodW5rU2l6ZVdhcm5pbmdMaW1pdDogNzAwLFxyXG4gIH0sXHJcbiAgc2VydmVyOiB7XHJcbiAgICBwb3J0OiA1MjczLFxyXG4gICAgc3RyaWN0UG9ydDogdHJ1ZSxcclxuICB9LFxyXG4gIHRlc3Q6IHtcclxuICAgIC8vIGpzZG9tIGJlY2F1c2UgcGVyc2lzdGVuY2UgdG91Y2hlcyBsb2NhbFN0b3JhZ2UgYW5kIHRoZSBleHBvcnRlcnMgdG91Y2ggQmxvYi9VUkwuXHJcbiAgICBlbnZpcm9ubWVudDogJ2pzZG9tJyxcclxuICAgIGluY2x1ZGU6IFsnc3JjLyoqLyoudGVzdC50cyddLFxyXG4gICAgcmVzdG9yZU1vY2tzOiB0cnVlLFxyXG4gICAgLy8gTG9hZHMgdGhlIFdBU00gYm9vbGVhbiBlbmdpbmUgYmVmb3JlIGFueSB0ZXN0LiBXaXRob3V0IGl0IHRoZSBzdWl0ZSBtZWFzdXJlcyB0aGUgQlNQXHJcbiAgICAvLyBmYWxsYmFjayByYXRoZXIgdGhhbiB0aGUgZW5naW5lIHRoZSBhcHBsaWNhdGlvbiBhY3R1YWxseSBzaGlwcy5cclxuICAgIHNldHVwRmlsZXM6IFsnLi9zcmMvdGVzdC1zZXR1cC50cyddLFxyXG4gICAgdGVzdFRpbWVvdXQ6IDMwXzAwMCxcclxuICB9LFxyXG59KTtcclxuIl0sCiAgIm1hcHBpbmdzIjogIjtBQUNBLFNBQVMsb0JBQW9CO0FBQzdCLE9BQU8sV0FBVztBQUVsQixJQUFPLHNCQUFRLGFBQWE7QUFBQSxFQUMxQixTQUFTLENBQUMsTUFBTSxDQUFDO0FBQUE7QUFBQTtBQUFBLEVBR2pCLE1BQU07QUFBQSxFQUNOLE9BQU87QUFBQSxJQUNMLFFBQVE7QUFBQSxJQUNSLGFBQWE7QUFBQSxJQUNiLFFBQVE7QUFBQTtBQUFBLElBQ1IsV0FBVztBQUFBLElBQ1gsdUJBQXVCO0FBQUEsRUFDekI7QUFBQSxFQUNBLFFBQVE7QUFBQSxJQUNOLE1BQU07QUFBQSxJQUNOLFlBQVk7QUFBQSxFQUNkO0FBQUEsRUFDQSxNQUFNO0FBQUE7QUFBQSxJQUVKLGFBQWE7QUFBQSxJQUNiLFNBQVMsQ0FBQyxrQkFBa0I7QUFBQSxJQUM1QixjQUFjO0FBQUE7QUFBQTtBQUFBLElBR2QsWUFBWSxDQUFDLHFCQUFxQjtBQUFBLElBQ2xDLGFBQWE7QUFBQSxFQUNmO0FBQ0YsQ0FBQzsiLAogICJuYW1lcyI6IFtdCn0K

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Locked-down CSP, with one deliberate opening.
+
+      This was written when the application was a task pane living inside a CAD process,
+      where reaching any remote origin would have been indefensible. The architecture then
+      inverted: it became a standalone modeller that can optionally call a language model,
+      and connect-src was never widened to match. The result was that *every* provider failed
+      with "Failed to fetch" — not because Google or Anthropic blocks browsers, but because
+      this page blocked itself. The message even blamed the provider.
+
+      So the AI endpoints are listed explicitly. Naming the four origins rather than opening
+      connect-src to https: keeps the protection that matters: API keys live in this origin's
+      local storage, and anything that manages to run script here still cannot post them
+      anywhere except the providers those keys already belong to.
+
+      A custom base URL — a proxy, a self-hosted gateway — will be blocked unless its origin
+      is added here. The settings panel says so rather than failing mysteriously.
+
+      localhost as well as 127.0.0.1, because Ollama's default host is the name, not the
+      address, and only the address was listed.
+
+      script-src carries 'unsafe-eval', and that is a deliberate trade rather than an
+      oversight.
+
+      The boolean engine is WebAssembly bound to JavaScript through Emscripten's Embind, which
+      generates its invoker functions with `new Function` at load time. Every build Manifold
+      ships does this; there is no variant that does not. 'wasm-unsafe-eval' was tried first
+      because it is the narrow directive that permits WebAssembly alone — it gets the module
+      compiled and then fails on the bindings.
+
+      What is given up: if a script injection ever existed on this origin, eval would make
+      exploiting it easier. What is not given up, and is what actually guards the API keys in
+      local storage, is connect-src — still four named provider origins and loopback, so
+      injected code cannot post a key anywhere it does not already belong. script-src 'self'
+      still refuses to load script from another origin at all.
+
+      What is bought: every boolean in the application. Filleting a box went from ten edges of
+      twelve to all twelve, a cup from 19 396 triangles to 3 538, a rebuild from 1.1 s to
+      0.12 s, and the defect that shaped most of the kernel's workarounds — a second cut into
+      a solid that already had a hole — simply stopped existing.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://generativelanguage.googleapis.com https://api.anthropic.com https://api.openai.com https://api.groq.com https://*.openai.azure.com http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>DATUM</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

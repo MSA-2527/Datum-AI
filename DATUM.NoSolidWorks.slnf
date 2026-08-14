@@ -1,0 +1,11 @@
+{
+  "solution": {
+    "path": "DATUM.sln",
+    "projects": [
+      "src\\DATUM.Contracts\\DATUM.Contracts.csproj",
+      "src\\DATUM.Orchestrator\\DATUM.Orchestrator.csproj",
+      "src\\DATUM.Studio\\DATUM.Studio.csproj",
+      "tests\\DATUM.Tests\\DATUM.Tests.csproj"
+    ]
+  }
+}

@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Covers everything that can be tested WITHOUT a SOLIDWORKS seat: the Operation IR,
+    the wire protocol, the operation catalogue, the plan validator and the generated
+    GBNF grammar. That is deliberately the whole safety model minus the COM calls —
+    the layers that decide whether a plan is allowed to touch a customer's model at all
+    are exactly the layers that must not depend on a licence to verify.
+
+    The kernel is excluded because it cannot compile without the SOLIDWORKS interop
+    assemblies; see DATUM.NoSolidWorks.slnf.
+  -->
+  <!-- Matches DATUM.Orchestrator's net8.0-windows target; a net8.0 test project cannot
+       reference a Windows-targeted one. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>Datum.Tests</RootNamespace>
+    <AssemblyName>DATUM.Tests</AssemblyName>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DATUM.Contracts\DATUM.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\DATUM.Orchestrator\DATUM.Orchestrator.csproj" />
+  </ItemGroup>
+
+  <!-- The orchestrator is an ASP.NET Core app; referencing its types needs the same
+       shared framework at compile time. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector" Version="6.0.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Datum.Contracts" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,54 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{md,markdown}]
+trim_trailing_whitespace = false
+indent_size = 2
+
+[*.{json,jsonc,yml,yaml,ts,tsx,js,jsx,css,html}]
+indent_size = 2
+
+[*.{csproj,props,targets,config}]
+indent_size = 2
+
+[*.sln]
+indent_style = tab
+
+# ── C# ───────────────────────────────────────────────────────────────────────
+[*.cs]
+indent_size = 4
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_indent_case_contents = true
+csharp_indent_switch_labels = true
+csharp_prefer_braces = when_multiline:suggestion
+csharp_style_namespace_declarations = file_scoped:silent
+csharp_style_var_for_built_in_types = false:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = false
+
+dotnet_naming_rule.private_fields_underscore.severity = suggestion
+dotnet_naming_rule.private_fields_underscore.symbols = private_fields
+dotnet_naming_rule.private_fields_underscore.style = underscore_camel
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+dotnet_naming_style.underscore_camel.required_prefix = _
+dotnet_naming_style.underscore_camel.capitalization = camel_case
+
+# The kernel is loaded into SLDWORKS.exe and talks to a COM API whose enums and
+# out-parameters are not ours to rename; these analyzer rules fight the interop
+# rather than improving the code.
+dotnet_diagnostic.CA1707.severity = none   # underscores in identifiers (swconst)
+dotnet_diagnostic.CA1051.severity = none   # visible instance fields (hot-path structs)
+dotnet_diagnostic.CA1031.severity = none   # catch-all is deliberate at COM boundaries
+dotnet_diagnostic.IDE0060.severity = suggestion
