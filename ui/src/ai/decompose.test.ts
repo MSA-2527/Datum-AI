@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSystemPrompt, decompose } from './decompose';
 import { type ProviderConfig } from './providers';
+import { constraintBrief } from '../lib/limits';
+import { addFromDocument, clearExamples } from '../lib/training';
+import { addFeature, emptyDocument } from '../model/document';
 
 /**
  * Model-routed decomposition.
@@ -59,6 +62,71 @@ describe('the prompt asks for the object that was requested', () => {
   it('refuses to let symmetry collapse the part count', () => {
     // "Four wheels" as one component is how a car becomes a box with two cylinders.
     expect(prompt).toMatch(/Four wheels are four/i);
+  });
+
+  it('states the manufacturing limits rather than leaving them to the linter', () => {
+    // Everything here was previously enforced only after the part existed, which meant the
+    // planner learned each rule by being corrected — a round trip the user waits for.
+    expect(prompt).toContain('MANUFACTURING LIMITS');
+    expect(prompt).toContain(constraintBrief());
+  });
+
+  it('puts the limits after the reference dimensions, not before them', () => {
+    // Reference figures decide what the object *is* and must be in hand first; the limits
+    // decide whether a chosen number may stand, which is the last judgement made.
+    const withReference = buildSystemPrompt('REFERENCE DIMENSIONS\n- a bearing is 22 mm');
+    expect(withReference.indexOf('REFERENCE DIMENSIONS'))
+      .toBeLessThan(withReference.indexOf('MANUFACTURING LIMITS'));
+  });
+
+  it('tells the model to build what was asked and flag the breach, not to override silently', () => {
+    expect(prompt).toMatch(/follow the\s+request and say in "notes"/);
+  });
+});
+
+describe('learning from the organisation\'s own parts', () => {
+  beforeEach(() => clearExamples());
+  afterEach(() => clearExamples());
+
+  it('puts a relevant taught example in front of the planner', async () => {
+    const doc = addFeature(emptyDocument('Motor bracket'), 'box',
+      { length: 120, width: 60, height: 8 }, 'Base plate');
+    expect(addFromDocument('a mounting bracket for a motor', doc).ok).toBe(true);
+
+    const systems: string[] = [];
+    let n = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messages: { role: string; content: string }[] };
+      systems.push(body.messages.find((m) => m.role === 'system')?.content ?? '');
+      return ++n === 1 ? reply('IDENTITY — a bracket. PARTS — 1. Plate') : reply(CAR_PLAN);
+    }));
+
+    const result = await decompose('a mounting bracket', { config, preferModel: true });
+
+    expect(result.ok).toBe(true);
+    // The plan call — not the study call — is the one that has to see the worked answers.
+    expect(systems[1]).toContain('WORKED EXAMPLES');
+    expect(systems[1]).toContain('a mounting bracket for a motor');
+
+    // And the user is told which of their parts steered it, so a bad example can be found.
+    expect(result.ok && result.message).toContain('Guided by your own part');
+  });
+
+  it('says nothing about examples when none is relevant to the request', async () => {
+    const doc = addFeature(emptyDocument('Cover'), 'box', { length: 40 }, 'Panel');
+    addFromDocument('a cover panel', doc);
+
+    const systems: string[] = [];
+    let n = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messages: { role: string; content: string }[] };
+      systems.push(body.messages.find((m) => m.role === 'system')?.content ?? '');
+      return ++n === 1 ? reply('IDENTITY — a gearbox. PARTS — 1. Case') : reply(CAR_PLAN);
+    }));
+
+    // An irrelevant example is worse than none: the model would try to follow it.
+    await decompose('a gearbox', { config, preferModel: true });
+    expect(systems[1]).not.toContain('WORKED EXAMPLES');
   });
 });
 

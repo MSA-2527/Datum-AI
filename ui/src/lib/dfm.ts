@@ -1,4 +1,5 @@
 import type { Geometry, PartDoc } from './partModel';
+import { DRILL, LASER, MILL, TOOLING } from './limits';
 
 /**
  * Design-for-manufacture analysis and cost estimation.
@@ -62,10 +63,10 @@ export const DEFAULT_RATES: ShopRates = {
 };
 
 /** Preferred metric drill sizes. Anything else means a custom tool or a reamer pass. */
-const STANDARD_DRILLS = [
-  1.5, 2, 2.5, 2.9, 3, 3.3, 3.4, 4, 4.2, 4.5, 5, 5.5, 6, 6.6, 6.8, 7, 8, 8.5, 9, 10, 10.5, 11, 12,
-  13, 14, 16, 18, 20,
-];
+// The stock drill list, the wall and depth limits and the rest of the numbers below live in
+// `limits.ts`, because the planner is told about them before it designs anything and a limit
+// written down twice eventually disagrees with itself. See that file.
+const STANDARD_DRILLS = DRILL.standardSizesMm;
 
 // ── findings ─────────────────────────────────────────────────────────────────
 
@@ -95,16 +96,16 @@ export function analyseDfm(
   const mat = materialFor(doc.material);
 
   // ── wall thickness ────────────────────────────────────────────────────────
-  if (geom.shellWall !== null && geom.shellWall < 0.8) {
+  if (geom.shellWall !== null && geom.shellWall < MILL.minWallMm) {
     out.push({
       id: 'wall-thin',
       severity: 'blocker',
       rule: 'dfm.mill.min-wall',
       title: `Wall of ${geom.shellWall.toFixed(2)} mm cannot be machined`,
       detail:
-        'Walls below roughly 0.8 mm chatter and deflect away from the cutter in aluminium, ' +
+        `Walls below roughly ${MILL.minWallMm} mm chatter and deflect away from the cutter in aluminium, ` +
         'and will not hold tolerance in steel at all.',
-      remedy: 'Increase the shell thickness to at least 1.0 mm, or 1.5 mm for a load-bearing wall.',
+      remedy: `Increase the shell thickness to at least ${MILL.recommendedWallMm.toFixed(1)} mm, or ${MILL.loadBearingWallMm.toFixed(1)} mm for a load-bearing wall.`,
     });
   }
 
@@ -113,25 +114,25 @@ export function analyseDfm(
     const depth = geom.T;
     const ratio = depth / hole.d;
 
-    if (ratio > 10) {
+    if (ratio > DRILL.maxDepthRatio) {
       out.push({
         id: `hole-deep-${i}`,
         severity: 'blocker',
         rule: 'dfm.drill.depth-ratio',
         title: `⌀${hole.d} mm hole is ${ratio.toFixed(1)}× deep`,
         detail:
-          'Beyond about 10× diameter a standard drill wanders and packs with chips. ' +
+          `Beyond about ${DRILL.maxDepthRatio}× diameter a standard drill wanders and packs with chips. ` +
           'This needs gun-drilling or a peck cycle with a specialist tool.',
         remedy: `Increase the hole to ⌀${(depth / 8).toFixed(1)} mm, or reduce the thickness.`,
         costImpact: 45,
       });
-    } else if (ratio > 4) {
+    } else if (ratio > DRILL.peckDepthRatio) {
       out.push({
         id: `hole-deepish-${i}`,
         severity: 'advisory',
         rule: 'dfm.drill.depth-ratio',
         title: `⌀${hole.d} mm hole is ${ratio.toFixed(1)}× deep`,
-        detail: 'Past 4× diameter the shop needs a peck cycle, which roughly doubles the drilling time.',
+        detail: `Past ${DRILL.peckDepthRatio}× diameter the shop needs a peck cycle, which roughly doubles the drilling time.`,
         remedy: 'Acceptable, but expect a small time premium.',
         costImpact: 4,
       });
@@ -141,7 +142,7 @@ export function analyseDfm(
     const edgeX = geom.L / 2 - Math.abs(hole.x) - hole.d / 2;
     const edgeY = geom.W / 2 - Math.abs(hole.y) - hole.d / 2;
     const edge = Math.min(edgeX, edgeY);
-    const minEdge = hole.d * 0.5;
+    const minEdge = hole.d * DRILL.edgeDistanceRatio;
 
     if (edge < 0) {
       out.push({
@@ -166,7 +167,7 @@ export function analyseDfm(
     }
 
     // Non-standard drill sizes mean a custom tool or an extra reaming pass.
-    if (!STANDARD_DRILLS.some((d) => Math.abs(d - hole.d) < 0.05)) {
+    if (!STANDARD_DRILLS.some((d) => Math.abs(d - hole.d) < DRILL.sizeToleranceMm)) {
       out.push({
         id: `hole-nonstd-${i}`,
         severity: 'advisory',
@@ -181,7 +182,7 @@ export function analyseDfm(
 
   // Duplicate diameters are free; a spread of them is not.
   const distinct = new Set(geom.holes.map((h) => h.d));
-  if (distinct.size > 3) {
+  if (distinct.size > TOOLING.maxDistinctHoleSizes) {
     out.push({
       id: 'tool-variety',
       severity: 'advisory',
@@ -189,7 +190,7 @@ export function analyseDfm(
       title: `${distinct.size} different hole diameters`,
       detail: 'Each distinct size is another tool change and another tool to stock.',
       remedy: 'Consolidate onto two or three sizes where the design allows.',
-      costImpact: (distinct.size - 3) * 6,
+      costImpact: (distinct.size - TOOLING.maxDistinctHoleSizes) * 6,
     });
   }
 
@@ -213,7 +214,7 @@ export function analyseDfm(
 
   // ── proportions ───────────────────────────────────────────────────────────
   const aspect = Math.max(geom.L, geom.W) / geom.T;
-  if (aspect > 40) {
+  if (aspect > MILL.maxPlateAspect) {
     out.push({
       id: 'aspect',
       severity: 'warning',
@@ -228,13 +229,13 @@ export function analyseDfm(
   }
 
   // ── process fit ───────────────────────────────────────────────────────────
-  if (process === 'lasercut' && geom.T > 20) {
+  if (process === 'lasercut' && geom.T > LASER.maxThicknessMm) {
     out.push({
       id: 'laser-thick',
       severity: 'blocker',
       rule: 'dfm.laser.max-thickness',
       title: `${geom.T} mm exceeds practical laser cutting thickness`,
-      detail: 'Above roughly 20 mm in aluminium the kerf tapers badly and edge quality collapses.',
+      detail: `Above roughly ${LASER.maxThicknessMm} mm in aluminium the kerf tapers badly and edge quality collapses.`,
       remedy: 'Switch to waterjet or milling.',
     });
   }

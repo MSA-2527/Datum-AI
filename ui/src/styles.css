@@ -2677,6 +2677,288 @@ select:focus {
 .ms-ask-actions button:disabled { opacity: 0.5; cursor: default; }
 
 
+/* ── the reuse offer ────────────────────────────────────────────────────── */
+
+/*
+ * Shares the clarification block's shape because it is the same kind of moment — the request
+ * has been read and something has to be decided before geometry exists — but takes the
+ * positive accent rather than the blue one. Blue is "the application is asking"; this is
+ * "the application found something", and the two should not be mistaken for each other at a
+ * glance when they appear in the same column.
+ */
+.ms-reuse {
+  display: grid;
+  gap: 9px;
+  margin: 8px 0;
+  padding: 10px 11px;
+  background: var(--bg-2, #151922);
+  border: 1px solid var(--line, #262c38);
+  border-left: 2px solid var(--ok, #46a758);
+  border-radius: 7px;
+}
+
+.ms-reuse-head { display: grid; gap: 2px; }
+.ms-reuse-head strong { font-size: 12px; color: var(--fg-1, #e6e9ef); }
+.ms-reuse-head span { font-size: 10.5px; line-height: 1.4; color: var(--fg-3, #8b93a3); }
+
+.ms-reuse-part {
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+  background: var(--bg-3, #1b202b);
+  border-radius: 6px;
+}
+
+.ms-reuse-part strong { font-size: 12px; color: var(--fg-1, #e6e9ef); }
+.ms-reuse-part span { font-size: 10.5px; line-height: 1.45; color: var(--fg-2, #aeb6c4); }
+.ms-reuse-when { color: var(--fg-3, #8b93a3) !important; }
+
+.ms-reuse-near { display: grid; gap: 3px; }
+.ms-reuse-near strong { font-size: 10.5px; color: var(--fg-3, #8b93a3); }
+.ms-reuse-near ul { margin: 0; padding-left: 16px; }
+.ms-reuse-near li { font-size: 10.5px; line-height: 1.45; color: var(--fg-2, #aeb6c4); }
+
+.ms-reuse-actions { display: flex; gap: 6px; }
+
+.ms-reuse-actions button {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--fg-1, #e6e9ef);
+  background: var(--bg-3, #1b202b);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.ms-reuse-actions button.primary {
+  color: #fff;
+  background: var(--ok, #46a758);
+  border-color: var(--ok, #46a758);
+}
+
+.ms-reuse-actions button:disabled { opacity: 0.5; cursor: default; }
+
+
+/* ── the rules the planner designs to ───────────────────────────────────── */
+
+.ms-limits { margin: 2px 0 6px; padding-left: 14px; }
+.ms-limits > li { list-style: none; margin-bottom: 6px; }
+.ms-limits > li > em {
+  font-style: normal;
+  font-weight: 600;
+  font-size: 10.5px;
+  color: var(--fg-2, #aeb6c4);
+}
+.ms-limits ul { margin: 2px 0 0; padding-left: 15px; }
+.ms-limits ul li {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--fg-3, #8b93a3);
+  /* Each line carries its physics in the title attribute; the cursor says so. */
+  cursor: help;
+}
+
+
+/* ── rack sizing ────────────────────────────────────────────────────────── */
+
+.rk {
+  margin: 8px 12px;
+  padding: 8px 10px;
+  font-size: 11px;
+  background: var(--bg-2, #151922);
+  border: 1px solid var(--line, #262c38);
+  border-left: 2px solid var(--acc, #4a9eff);
+  border-radius: 7px;
+}
+
+.rk > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--fg-1, #e6e9ef);
+}
+
+.rk-flag {
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+  color: #fff;
+  background: var(--dang, #e5484d);
+  border-radius: 8px;
+}
+
+.rk-body { display: grid; gap: 10px; margin-top: 9px; }
+.rk-group { display: grid; gap: 2px; }
+.rk-group > strong { font-size: 10.5px; color: var(--fg-3, #8b93a3); text-transform: uppercase; letter-spacing: 0.04em; }
+
+.rk-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+}
+.rk-row > span { font-size: 10.5px; color: var(--fg-3, #8b93a3); flex: none; }
+.rk-row > strong {
+  font: 500 11px/1.35 ui-monospace, Menlo, monospace;
+  color: var(--fg-1, #e6e9ef);
+  text-align: right;
+}
+.rk-row[title] { cursor: help; }
+
+.rk-checks { display: grid; gap: 5px; margin: 2px 0 0; padding: 0; list-style: none; }
+.rk-checks li {
+  display: grid;
+  gap: 2px;
+  padding: 5px 7px;
+  border-left: 2px solid var(--ok, #46a758);
+  border-radius: 4px;
+  background: var(--bg-3, #1b202b);
+}
+.rk-checks li[data-ok='false'][data-severity='blocker'] { border-left-color: var(--dang, #e5484d); }
+.rk-checks li[data-ok='false'][data-severity='warning'] { border-left-color: var(--warn, #e5a04d); }
+.rk-checks li[data-ok='false'][data-severity='advisory'] { border-left-color: var(--fg-3, #8b93a3); }
+
+.rk-check-title { font-size: 10.5px; font-weight: 600; color: var(--fg-1, #e6e9ef); }
+.rk-check-detail { font-size: 10.5px; line-height: 1.45; color: var(--fg-3, #8b93a3); }
+
+
+/* ── teaching from your own parts ───────────────────────────────────────── */
+
+.tr-what {
+  font-size: 11px;
+  color: var(--fg-2, #aeb6c4);
+  background: var(--bg-2, #151922);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 6px;
+  padding: 7px 9px;
+}
+
+.tr-what summary { cursor: pointer; font-weight: 600; color: var(--fg-2, #aeb6c4); }
+.tr-what ul { margin: 7px 0 0; padding-left: 16px; }
+.tr-what li { margin-bottom: 6px; font-size: 10.5px; line-height: 1.5; color: var(--fg-3, #8b93a3); }
+.tr-what li strong { color: var(--fg-2, #aeb6c4); }
+
+
+/* ── what a bulk teach did to each file ─────────────────────────────────── */
+
+.tr-report {
+  font-size: 11px;
+  background: var(--bg-2, #151922);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 6px;
+  padding: 7px 9px;
+}
+
+.tr-report summary { cursor: pointer; font-weight: 600; color: var(--fg-2, #aeb6c4); }
+.tr-report ul {
+  margin: 7px 0 0;
+  padding: 0;
+  max-height: 30vh;
+  overflow-y: auto;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+
+.tr-report li {
+  display: grid;
+  gap: 1px;
+  padding: 4px 7px;
+  border-left: 2px solid var(--fg-3, #8b93a3);
+  border-radius: 4px;
+  background: var(--bg-3, #1b202b);
+}
+
+.tr-report li[data-outcome='taught'] { border-left-color: var(--ok, #46a758); }
+.tr-report li[data-outcome='unreadable'] { border-left-color: var(--dang, #e5484d); }
+.tr-report li[data-outcome='incomplete'] { border-left-color: var(--warn, #e5a04d); }
+
+.tr-report li strong { font-size: 10.5px; color: var(--fg-1, #e6e9ef); }
+.tr-report li span { font-size: 10px; line-height: 1.4; color: var(--fg-3, #8b93a3); }
+
+
+/* ── the part library ───────────────────────────────────────────────────── */
+
+.lib-save { display: flex; gap: 6px; }
+.lib-save input { flex: 1; }
+
+.lib-save button {
+  padding: 7px 14px;
+  font-size: 12.5px;
+  color: #fff;
+  background: var(--acc, #4a9eff);
+  border: 1px solid var(--acc, #4a9eff);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.lib-save button:disabled { opacity: 0.45; cursor: default; }
+
+.lib-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  max-height: 34vh;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.lib-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  background: var(--bg-2, #151922);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 6px;
+}
+
+.lib-item-text { display: grid; gap: 2px; min-width: 0; }
+.lib-item-text strong { font-size: 12px; color: var(--fg-1, #e6e9ef); }
+.lib-item-text span { font-size: 10.5px; color: var(--fg-3, #8b93a3); }
+
+.lib-item-actions { display: flex; gap: 5px; flex: none; }
+
+.lib-item-actions button,
+.lib-confirm button {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--fg-2, #aeb6c4);
+  background: var(--bg-3, #1b202b);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.lib-item-actions button:hover,
+.lib-confirm button:hover { color: var(--fg-1, #e6e9ef); border-color: var(--acc, #4a9eff); }
+
+.lib-item-actions button.danger:hover,
+.lib-confirm button.danger:hover { color: var(--dang, #e5484d); border-color: var(--dang, #e5484d); }
+
+.lib-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 9px;
+  font-size: 10.5px;
+  color: var(--fg-2, #aeb6c4);
+  background: var(--bg-2, #151922);
+  border: 1px solid var(--dang, #e5484d);
+  border-radius: 6px;
+}
+
+.lib-confirm span { flex: 1; }
+
+
 /* ── moving a part ──────────────────────────────────────────────────────── */
 
 .mt-place {

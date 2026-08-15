@@ -13,9 +13,24 @@ import {
   applyAnswers, clarify, describeAnswers, type Clarification,
 } from './ai/clarify';
 import { loadConfig, saveConfig, type ProviderConfig } from './ai/providers';
+import {
+  listLibrary, openFromLibrary, removeFromLibrary, saveToLibrary, snapshotOf,
+  type LibraryEntry,
+} from './lib/library';
+import { dimension, triage, type Conflict, type ReuseMatch } from './lib/reuse';
+import { addFromDocument, listExamples, removeExample, type Example } from './lib/training';
+import {
+  describeBulk, readManifest, teachFiles, type BulkInput, type BulkResult,
+} from './lib/bulk';
+import { featureFromFit, fitArchetype } from './ingest/fit/archetype';
+import { featuresFromPrismatic, fitPrismatic } from './ingest/fit/prismatic';
+import {
+  describeRack, designRack, measurePart, type RackDesign, type RackOptions,
+} from './domain/anodizing';
 import { billOfMaterials, type AssemblyPlan, type BomLine } from './assembly/plan';
 import { traceImage, type RasterImage } from './ingest/image/trace';
 import { readDxf } from './ingest/drawing/dxf';
+import { readStep } from './ingest/step/read';
 import { importDrawing } from './ingest/drawing/reconstruct';
 import { makeDrawing, drawingToDxf, drawingToSvg } from './drafting/sheet';
 import { bounds, massProperties, triCount } from './kernel/topo/mesh';
@@ -79,6 +94,20 @@ interface ModelState {
    */
   pending: { request: string; clarification: Clarification; answers: Record<string, number> } | null;
 
+  /**
+   * A saved part that already answers the request, held instead of generating one.
+   *
+   * The interruption only has value before the work is done, so `build` sets this and stops
+   * rather than building and mentioning it afterwards. The decision is always the user's:
+   * `acceptReuse` opens the part, `buildAnyway` generates the new one regardless.
+   */
+  reuse: {
+    request: string;
+    match: ReuseMatch;
+    /** Saved parts that matched by name but contradict a dimension the request stated. */
+    nearMisses: { entry: LibraryEntry; conflicts: Conflict[] }[];
+  } | null;
+
   // ── mutations ──
   commit: (doc: Document, label: string) => void;
   /** Schedules a background rebuild. The result arrives asynchronously. */
@@ -116,7 +145,11 @@ interface ModelState {
    * then the single-part catalogue, and only reaches for a model when neither matched. One
    * entry point, so a caller never has to know which route was taken.
    */
-  build: (prompt: string) => Promise<{ ok: boolean; message: string }>;
+  build: (prompt: string, options?: { skipReuse?: boolean }) => Promise<{ ok: boolean; message: string }>;
+  /** Opens the saved part offered instead of generating. */
+  acceptReuse: () => { ok: boolean; message: string };
+  /** Generates anyway, having been shown what already exists. */
+  buildAnyway: () => Promise<{ ok: boolean; message: string }>;
   /** Records an answer to one of the pending questions. */
   answer: (key: string, choiceIndex: number) => void;
   /** Builds from the answers given so far, defaults filling the rest. */
@@ -126,6 +159,14 @@ interface ModelState {
   bom: () => BomLine[];
   importImage: (image: RasterImage, mmPerPixel: number, thickness: number) => { ok: boolean; message: string };
   importDxf: (text: string) => { ok: boolean; message: string };
+  /**
+   * Reads a STEP file as a solid.
+   *
+   * The route an existing library actually takes: the native formats are proprietary binary,
+   * and the CAD seat that can read them exports this. What arrives is a mesh — measurable and
+   * searchable — and `recogniseShape` is what turns it back into something editable.
+   */
+  importStep: (text: string) => { ok: boolean; message: string };
 
   /**
    * Edits a driving dimension.
@@ -166,6 +207,72 @@ interface ModelState {
   exportStep: () => { name: string; text: string; note: string } | null;
   save: () => string;
   load: (text: string) => boolean;
+
+  // ── the part library ──
+  /**
+   * Everything saved locally, most recent first.
+   *
+   * Read straight from storage on every call rather than mirrored into the store. The
+   * library is small, reading it is a single parse, and a mirrored copy would go stale the
+   * moment a second tab saved something — which is exactly when being told "you already have
+   * this" matters most.
+   */
+  library: () => LibraryEntry[];
+
+  // ── the training set ──
+  /**
+   * Teaches the open part as the answer to a request.
+   *
+   * Held here rather than in the dialog so the same action serves both routes into the
+   * corpus: teaching a saved part deliberately, and capturing a build the user then
+   * corrected — which is the more valuable of the two, because it encodes a disagreement
+   * the product got wrong once.
+   */
+  teach: (prompt: string, origin?: 'library' | 'correction') => { ok: boolean; message: string };
+  examples: () => Example[];
+  /**
+   * Teaches a folder of exported parts in one pass.
+   *
+   * The single-part path is the right shape for one part and the wrong shape for nine
+   * hundred. Geometry comes from the STEP files and the request from the manifest the export
+   * macro wrote beside them — see `lib/bulk.ts` for why the manifest is the half that matters.
+   */
+  teachFolder: (
+    files: BulkInput[], manifestText?: string,
+  ) => { ok: boolean; message: string; result: BulkResult };
+  forget: (id: string) => { ok: boolean; message: string };
+  /** The last request that produced geometry, offered as the default when teaching. */
+  lastRequest: string | null;
+  /**
+   * Reads an imported solid back into the catalogue's vocabulary.
+   *
+   * The step that turns a library you imported into a library you can learn from. An imported
+   * mesh can be measured, searched and exported, and it cannot be taught — a training example
+   * is a plan, and a plan is archetypes and primitives. Recovering the archetype makes the
+   * part parametric, editable and teachable at once.
+   *
+   * Refuses far more often than it succeeds, and says why. See `ingest/fit/archetype.ts`.
+   */
+  recogniseShape: () => { ok: boolean; message: string };
+
+  /**
+   * Designs an anodizing rack for the part on screen, and builds it.
+   *
+   * The part is measured rather than described: surface area comes off the solid, and every
+   * dimension of the rack follows from the current that area draws. A finned part has several
+   * times the area of its envelope and needs a rack sized for that, which is exactly the
+   * calculation nobody does by hand and everybody gets wrong.
+   *
+   * The measurement is taken *before* the model is replaced, because building the rack throws
+   * the part away — see the note in the implementation.
+   */
+  designRackForPart: (options?: RackOptions) => { ok: boolean; message: string };
+  /** The last rack designed, so the UI can show its numbers and checks. */
+  rackDesign: RackDesign | null;
+  /** Saves the current document under a name, replacing any part already using it. */
+  saveToLibrary: (name: string) => { ok: boolean; message: string };
+  openFromLibrary: (name: string) => { ok: boolean; message: string };
+  removeFromLibrary: (name: string) => { ok: boolean; message: string };
 }
 
 const HISTORY_LIMIT = 60;
@@ -241,6 +348,9 @@ export const useModel = create<ModelState>((set, get) => ({
   selectedFeatureId: null,
   selectedFaces: [],
   pending: null,
+  reuse: null,
+  lastRequest: null,
+  rackDesign: null,
   editingFeatureId: null,
   undoStack: [],
   redoStack: [],
@@ -439,10 +549,45 @@ export const useModel = create<ModelState>((set, get) => ({
    * This is the path that handles assemblies. It tries the built-in recipes first, then the
    * single-part catalogue, and only reaches for a model when neither matched — so the common
    * cases stay offline and instant, and a model is spent on the requests that need one.
+   *
+   * Before any of that it asks the library whether the part already exists, because the
+   * cheapest route of all is the one that builds nothing. See `lib/reuse.ts` for why that
+   * question is asked here rather than after the geometry exists.
    */
-  async build(prompt) {
-    set({ building: true, pending: null });
+  async build(prompt, options) {
+    set({ building: true, pending: null, reuse: null });
     try {
+      // Reuse triage. Strict by construction: it either produces a part worth interrupting
+      // for or it steps aside silently, and it never delays a build by more than a
+      // localStorage read.
+      let nearMissNote = '';
+      if (!options?.skipReuse) {
+        const { match, nearMisses } = triage(listLibrary(), prompt);
+
+        if (match) {
+          const text =
+            `You already have "${match.entry.name}" — ${match.reason}. ` +
+            'Open it, or build a new one anyway.';
+          set({
+            reuse: { request: prompt, match, nearMisses },
+            building: false,
+            notice: { tone: 'info', text },
+          });
+          return { ok: true, message: text };
+        }
+
+        // A saved part that matched by name but not by size is worth mentioning while
+        // building the new one — it is usually the part someone means to revise.
+        const near = nearMisses[0];
+        if (near) {
+          const c = near.conflicts[0]!;
+          nearMissNote =
+            ` You also have "${near.entry.name}", which is the same kind of part at ` +
+            `${c.label.toLowerCase()} ${dimension(c.saved, c.unit)} rather than ` +
+            `${dimension(c.wanted, c.unit)}.`;
+        }
+      }
+
       // Only parts that are made to fit something else are worth asking about, and only when
       // the request did not already say. "Make a cup 90 mm tall" has been specified; asking
       // about it would be an obstacle, and an early version that asked every time broke a
@@ -471,7 +616,8 @@ export const useModel = create<ModelState>((set, get) => ({
               (clarification.researchNote ? ` ${clarification.researchNote}` : '') +
               (clarification.citations.length > 0
                 ? ` Researched from ${clarification.citations.length} source${clarification.citations.length === 1 ? '' : 's'}.`
-                : ''),
+                : '')
+              + nearMissNote,
           };
         }
       }
@@ -487,6 +633,10 @@ export const useModel = create<ModelState>((set, get) => ({
       get().commit(result.doc, `build ${result.doc.name}`);
       set({
         plan: result.plan,
+        // Kept so that teaching does not ask the user to retype the request they just made.
+        // The sentence and the part are only an example together, and the sentence is the
+        // half that is gone the moment the transcript scrolls.
+        lastRequest: prompt,
         selectedFeatureId: result.doc.features[0]?.id ?? null,
         editingFeatureId: result.doc.features[0]?.id ?? null,
       });
@@ -497,7 +647,7 @@ export const useModel = create<ModelState>((set, get) => ({
         ? ` Adjusted: ${result.corrections.slice(0, 3).join(' ')}`
         : '';
 
-      const message = `${result.message}${extra}`;
+      const message = `${result.message}${extra}${nearMissNote}`;
       set({ notice: { tone: result.corrections.length > 0 ? 'warn' : 'info', text: message } });
       return { ok: true, message };
     } catch (e) {
@@ -508,6 +658,26 @@ export const useModel = create<ModelState>((set, get) => ({
     // `building` is deliberately not cleared here. The rebuild `commit` scheduled is still
     // running in the worker, and the evaluator owns that flag; clearing it now would show
     // the model as finished while the geometry was still being computed.
+  },
+
+  acceptReuse() {
+    const reuse = get().reuse;
+    if (!reuse) return { ok: false, message: 'There is nothing waiting to be opened.' };
+
+    const name = reuse.match.entry.name;
+    const result = get().openFromLibrary(name);
+    set({ reuse: null });
+    return result.ok
+      ? { ok: true, message: `Opened "${name}" instead of building a new one.` }
+      : result;
+  },
+
+  async buildAnyway() {
+    const reuse = get().reuse;
+    if (!reuse) return { ok: false, message: 'There is nothing waiting to be built.' };
+
+    set({ reuse: null });
+    return get().build(reuse.request, { skipReuse: true });
   },
 
   answer(key, choiceIndex) {
@@ -551,6 +721,7 @@ export const useModel = create<ModelState>((set, get) => ({
       set({
         pending: null,
         plan: null,
+        lastRequest: pending.request,
         selectedFeatureId: first,
         editingFeatureId: first,
       });
@@ -592,6 +763,7 @@ export const useModel = create<ModelState>((set, get) => ({
       redoStack: [],
       notice: null,
       plan: null,
+      reuse: null,
     });
     get().rebuild(doc);
   },
@@ -637,6 +809,45 @@ export const useModel = create<ModelState>((set, get) => ({
       `${traced.report.holesFound} hole${traced.report.holesFound === 1 ? '' : 's'}.`;
 
     set({ notice: { tone: 'info', text: message } });
+    return { ok: true, message };
+  },
+
+  importStep(text) {
+    const read = readStep(text);
+    if ('error' in read) {
+      const message = read.line ? `${read.error} (line ${read.line})` : read.error;
+      set({ notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+
+    const base = emptyDocument(read.name);
+    const doc = addFeature(
+      base, 'imported',
+      { __mesh: read.mesh as unknown as ParamValue, operation: 'add' },
+      'Imported solid',
+    );
+    get().commit(doc, 'import STEP');
+
+    const b = bounds(read.mesh);
+    const size = [0, 1, 2].map((i) => (b.max[i]! - b.min[i]!).toFixed(1)).join(' × ');
+    const grams = (Math.abs(massProperties(read.mesh).volume) / 1000) * base.density;
+
+    // Size and mass first, then the caveats. A user reads the first clause as the verdict, and
+    // leading with what could not be read makes a successful import look like a failure.
+    const message = [
+      `Read ${read.faces} face${read.faces === 1 ? '' : 's'} — a solid ${size} mm, ` +
+      `${formatGrams(grams)}.`,
+      ...read.notes,
+      'Press Recognise to read it back into an editable shape.',
+    ].join(' ');
+
+    set({
+      plan: null,
+      reuse: null,
+      selectedFeatureId: doc.features[0]?.id ?? null,
+      notice: { tone: read.closed ? 'info' : 'warn', text: message },
+    });
+
     return { ok: true, message };
   },
 
@@ -912,10 +1123,264 @@ export const useModel = create<ModelState>((set, get) => ({
       redoStack: [],
       selectedFeatureId: null,
       editingFeatureId: null,
+      // The plan belongs to the document that was open, not to this one. Left in place it
+      // fed the previous assembly's bill of materials to a part that has nothing to do
+      // with it.
+      plan: null,
+      reuse: null,
       notice: { tone: 'info', text: `Opened ${doc.name}.` },
     });
     get().rebuild(doc);
     return true;
+  },
+
+  library() {
+    return listLibrary();
+  },
+
+  teach(prompt, origin = 'library') {
+    const result = addFromDocument(prompt, get().doc, origin);
+    if (!result.ok) {
+      const message = result.problem ?? 'That part could not be taught.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    const count = listExamples().length;
+    const parts = result.example!.plan.components.length;
+    const message =
+      `Taught "${result.example!.prompt}" — ${parts} component${parts === 1 ? '' : 's'}. ` +
+      `${count} example${count === 1 ? '' : 's'} now steer${count === 1 ? 's' : ''} what gets built.`;
+    set({ notice: { tone: 'info', text: message } });
+    return { ok: true, message };
+  },
+
+  examples() {
+    return listExamples();
+  },
+
+  teachFolder(files, manifestText) {
+    const manifest = manifestText ? readManifest(manifestText) : undefined;
+    const result = teachFiles(files, { manifest });
+
+    const total = listExamples().length;
+    const message = describeBulk(result)
+      + (result.taught > 0
+        ? ` ${total} example${total === 1 ? '' : 's'} now steer${total === 1 ? 's' : ''} what gets built.`
+        : ' Nothing was taught — open one of the files and press Recognise to see why.');
+
+    set({ notice: { tone: result.taught > 0 ? 'info' : 'warn', text: message } });
+    return { ok: result.taught > 0, message, result };
+  },
+
+  designRackForPart(options = {}) {
+    const doc = get().doc;
+    const evaluated = get().evaluated;
+
+    if (triCount(evaluated.mesh) === 0) {
+      const message = 'Open or build the part first — a rack is sized from the part that goes on it.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    // Measured now, while the part is still the model. `commit` below replaces the document
+    // with the rack, and an area read afterwards would be the rack's own.
+    const part = measurePart(evaluated.mesh, doc.density);
+    const design = designRack(part, options);
+
+    const archetype = archetypeById('rack')!;
+    const params: Record<string, ParamValue> = {
+      archetypeId: 'rack',
+      ...design.archetypeParams,
+    };
+
+    const base = emptyDocument(`Rack for ${doc.name}`);
+    const rackDoc = addFeature(
+      { ...base, material: design.material.name, density: design.material.density },
+      'archetype', params, archetype.label,
+    );
+
+    get().commit(rackDoc, 'design rack');
+
+    const message = describeRack(design);
+    set({
+      rackDesign: design,
+      plan: null,
+      selectedFeatureId: rackDoc.features[0]?.id ?? null,
+      editingFeatureId: rackDoc.features[0]?.id ?? null,
+      notice: {
+        tone: design.checks.some((c) => !c.ok && c.severity === 'blocker') ? 'warn' : 'info',
+        text: message,
+      },
+    });
+
+    return { ok: true, message };
+  },
+
+  recogniseShape() {
+    const doc = get().doc;
+    const imported = doc.features.filter((f) => f.kind === 'imported' && !f.suppressed);
+
+    if (imported.length === 0) {
+      const message = 'Nothing here was imported — every feature already has a recipe behind it.';
+      set({ notice: { tone: 'info', text: message } });
+      return { ok: false, message };
+    }
+
+    const replaced: string[] = [];
+    const refused: string[] = [];
+    let next = doc;
+
+    for (const feature of imported) {
+      const mesh = feature.params.__mesh as unknown;
+      if (!mesh || typeof mesh !== 'object') {
+        refused.push(`${feature.name}: its geometry was not saved with it`);
+        continue;
+      }
+
+      // A catalogue shape first: a part that really is a washer is better described as one
+      // than as a circular profile, because its parameters mean something.
+      const shape = fitArchetype(mesh as never);
+
+      // Then the general case. Most of a real library is an outline cut to a thickness, and
+      // no catalogue will ever name those — so the profile is recovered instead.
+      const profile = shape.best ? null : fitPrismatic(mesh as never);
+
+      if (!shape.best && !profile?.best) {
+        refused.push(
+          `${feature.name}: ${profile?.reason ?? shape.reason ?? 'nothing fits'}`,
+        );
+        continue;
+      }
+
+      // Placed where the imported solid sat, so recognising a part does not move it. The
+      // conversion is shared with the bulk path so the two cannot describe a fit differently.
+      //
+      // A catalogue shape is one feature; a recovered profile is one per layer, so a stepped
+      // part arrives as the base and the pads on it — the tree somebody would have built.
+      const recovered = shape.best
+        ? [{ ...featureFromFit(shape.best), offset: 0 }]
+        : featuresFromPrismatic(profile!.best!);
+      const best = shape.best ?? profile!.best!;
+
+      const at = next.features.findIndex((f) => f.id === feature.id);
+      const rebuilt = recovered.map((r, i) => ({
+        ...feature,
+        id: i === 0 ? feature.id : `${feature.id}_${i}`,
+        kind: r.kind as FeatureKind,
+        params: r.params as Record<string, ParamValue>,
+        name: r.name,
+        placement: {
+          ...(feature.placement ?? { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 }),
+          z: (feature.placement?.z ?? 0) + r.offset,
+        },
+      }));
+
+      next = {
+        ...next,
+        features: [
+          ...next.features.slice(0, at),
+          ...rebuilt,
+          ...next.features.slice(at + 1),
+        ],
+      };
+
+      replaced.push(
+        `${feature.name} → ${recovered.length === 1 ? recovered[0]!.name : `${recovered.length} layers`}`
+        + ` (${best.detail})`,
+      );
+    }
+
+    if (replaced.length === 0) {
+      const message = `Nothing could be recognised. ${refused.join(' ')}`;
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    get().commit(next, 'recognise shape');
+
+    const message =
+      `Recognised ${replaced.length} of ${imported.length}: ${replaced.join('; ')}. ` +
+      'These are parametric now — editable, and teachable.' +
+      (refused.length > 0 ? ` Not recognised: ${refused.join(' ')}` : '');
+
+    set({ notice: { tone: 'info', text: message } });
+    return { ok: true, message };
+  },
+
+  forget(id) {
+    const result = removeExample(id);
+    if (!result.ok) {
+      const message = result.problem ?? 'That example could not be removed.';
+      set({ notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+    set({ notice: { tone: 'info', text: 'Forgot that example.' } });
+    return { ok: true, message: 'Forgot that example.' };
+  },
+
+  saveToLibrary(name) {
+    const clean = name.trim();
+    if (!clean) {
+      const message = 'Give the part a name to save it under.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    // Measured from the evaluation on screen, which is the geometry the user is looking at
+    // and agreeing to save. See `snapshotOf` for why it is captured now rather than
+    // recomputed when the library is read.
+    const result = saveToLibrary(clean, get().doc, snapshotOf(get().evaluated));
+    if (!result.ok) {
+      const message = result.problem ?? 'That part could not be saved.';
+      set({ notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+
+    // The document takes the name it was saved under, so the tree, the exports and the
+    // library agree about what this part is called.
+    set({
+      doc: { ...get().doc, name: clean },
+      notice: {
+        tone: 'info',
+        text: `Saved "${clean}" to the part library. Requests that match it will offer it before building a new one.`,
+      },
+    });
+    return { ok: true, message: `Saved "${clean}".` };
+  },
+
+  openFromLibrary(name) {
+    const { doc, problem } = openFromLibrary(name);
+    if (!doc) {
+      const message = problem ?? `"${name}" could not be opened.`;
+      set({ notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+
+    set({
+      doc,
+      undoStack: [],
+      redoStack: [],
+      selectedFeatureId: null,
+      editingFeatureId: null,
+      plan: null,
+      reuse: null,
+      notice: { tone: 'info', text: `Opened "${name}".` },
+    });
+    get().rebuild(doc);
+    return { ok: true, message: `Opened "${name}".` };
+  },
+
+  removeFromLibrary(name) {
+    const result = removeFromLibrary(name);
+    if (!result.ok) {
+      const message = result.problem ?? `"${name}" could not be deleted.`;
+      set({ notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+
+    set({ notice: { tone: 'info', text: `Deleted "${name}" from the library.` } });
+    return { ok: true, message: `Deleted "${name}".` };
   },
 }));
 

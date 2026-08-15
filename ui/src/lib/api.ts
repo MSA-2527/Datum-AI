@@ -92,6 +92,20 @@ class ApiClient {
       this.token = new URLSearchParams(location.search).get('token') ?? '';
     }
 
+    // Nothing to look for on a static host.
+    //
+    // The orchestrator announces itself one of two ways: it injects `DATUM_SESSION` into the
+    // page it serves, or it opens the Studio window with a token on the query string. With
+    // neither, there is no orchestrator to find, and probing anyway fetches `/health` against
+    // whatever origin is serving the bundle — the root of a GitHub Pages domain, say — which
+    // 404s and writes an error to the console on every single load. The application then works
+    // perfectly while appearing to have failed at startup.
+    if (!session && !this.token) {
+      this.demo = true;
+      this.listeners.connection?.(false);
+      return;
+    }
+
     try {
       const res = await fetch(`${this.base}/health`, { cache: 'no-store' });
       if (!res.ok) throw new Error(String(res.status));

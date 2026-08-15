@@ -88,6 +88,18 @@ jobs:
       - name: Install
         run: npm ci
 
+      # The kernel's own test suite. It was not run here until now, which meant the exact
+      # predicates, the boolean engine, the constraint solver and every importer were gating
+      # nothing — the job checked that the TypeScript compiled and stopped there.
+      - name: Test
+        run: npm test
+
+      # The benchmark is a gate, not a report: a regression means the product got worse at the
+      # thing it exists to do. It runs offline with no model configured, so it costs nothing
+      # and returns the same answer twice.
+      - name: Benchmark
+        run: npx vitest run src/eval/eval.test.ts
+
       # `npm run build` runs `tsc --noEmit` first, so strict TypeScript is gating.
       - name: Typecheck and build
         run: npm run build

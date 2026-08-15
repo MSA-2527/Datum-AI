@@ -1,0 +1,85 @@
+# Publishes the standalone modeller to GitHub Pages.
+#
+# The whole application runs in the browser — its own geometry kernel, constraint solver and
+# drafting engine — so a static host is a complete deployment rather than a demo of one. The
+# SOLIDWORKS connector and the local orchestrator are optional and simply absent here, which
+# is a supported configuration and the one the free tier runs in.
+#
+# Two things make this work and are worth not breaking:
+#
+#   * `base: './'` in `vite.config.ts` emits relative asset paths, so the bundle runs from
+#     `user.github.io/repo/` without the repository name being compiled into it.
+#   * Surfaces are selected with a query string (`?surface=studio`), not a path, so no
+#     single-page-app 404 fallback is needed.
+#
+# The build is gated on the tests and the benchmark, deliberately repeating what `ci.yml`
+# already checks. A deployment gate that trusts another workflow's result is a deployment gate
+# that publishes whatever was last merged; publishing a broken kernel to a public URL is worse
+# than publishing nothing, and both gates run in well under a minute.
+
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and let a run in progress finish rather than cancelling it
+# half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install
+        working-directory: ui
+        run: npm ci
+
+      - name: Types
+        working-directory: ui
+        run: npm run typecheck
+
+      - name: Tests
+        working-directory: ui
+        run: npm test
+
+      # The benchmark is a gate, not a report. A regression here means the product got worse
+      # at the thing it exists to do, which is not something to find out from a user.
+      - name: Benchmark
+        working-directory: ui
+        run: npx vitest run src/eval/eval.test.ts
+
+      - name: Build
+        working-directory: ui
+        run: npm run build
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ui/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

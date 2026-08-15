@@ -84,8 +84,19 @@ export interface AssemblyPlan {
   citations?: { title: string; uri: string }[];
 }
 
-/** Primitive shapes a component may use when no archetype fits. */
-const PRIMITIVE_KINDS = new Set<FeatureKind>(['box', 'cylinder', 'sphere']);
+/**
+ * Shapes a plan may use that are not archetypes.
+ *
+ * `sketch` is here for a reason worth stating. A catalogue of named shapes covers the parts
+ * somebody thought of in advance, and a real library is mostly parts nobody did: an outline
+ * cut to a thickness, different every time. Admitting a profile to the vocabulary is what
+ * lets those parts be described at all — and therefore imported as something editable, and
+ * taught as an example.
+ *
+ * Its profile travels in `params.sketch` as the document's own JSON wire form, which the
+ * schema already allows: a parameter may be a string.
+ */
+const PRIMITIVE_KINDS = new Set<FeatureKind>(['box', 'cylinder', 'sphere', 'sketch']);
 
 export const isPrimitive = (shape: string): boolean => PRIMITIVE_KINDS.has(shape as FeatureKind);
 export const isArchetype = (shape: string): boolean => archetypeById(shape) !== undefined;
@@ -420,6 +431,92 @@ export function buildAssembly(plan: AssemblyPlan): Document {
   }
 
   return doc;
+}
+
+/**
+ * The inverse: a document read back as the plan that would produce it.
+ *
+ * Needed because a worked example has to be in *exactly* the form the planner is asked to
+ * emit. Showing a model a feature tree and then asking it for an assembly plan teaches it
+ * the wrong shape — the example has to be the answer, not a paraphrase of it.
+ *
+ * Not every document can be one. A plan's vocabulary is archetypes and primitives placed in
+ * space; a document may also hold sketches, extrudes, fillets, holes and traced imports,
+ * none of which a plan can express. Those features are **reported, not dropped**: an example
+ * silently missing the pocket that gives the part its purpose is worse than no example, and
+ * the caller needs to be able to say so.
+ *
+ * Quantities are not re-collapsed. `buildAssembly` expands a component of quantity 4 into
+ * four features and mirrors their placements; guessing which four features were once one
+ * component would be inference dressed as a round trip, and it would be wrong the first time
+ * someone moved one of them.
+ */
+export interface DocumentAsPlan {
+  plan: AssemblyPlan;
+  /** Features a plan cannot express, with the reason, in tree order. */
+  excluded: { name: string; reason: string }[];
+}
+
+export function planFromDocument(doc: Document): DocumentAsPlan {
+  const components: ComponentSpec[] = [];
+  const excluded: { name: string; reason: string }[] = [];
+
+  for (const feature of doc.features) {
+    if (feature.suppressed) {
+      excluded.push({ name: feature.name, reason: 'suppressed' });
+      continue;
+    }
+
+    let shape: string | null = null;
+    if (isPrimitive(feature.kind)) {
+      shape = feature.kind;
+    } else if (feature.kind === 'archetype') {
+      const id = feature.params.archetypeId;
+      shape = typeof id === 'string' && archetypeById(id) ? id : null;
+    }
+
+    if (!shape) {
+      excluded.push({
+        name: feature.name,
+        reason: `a "${feature.kind}" feature has no equivalent in a plan`,
+      });
+      continue;
+    }
+
+    // `operation` and `archetypeId` are how a document records what a plan says in its own
+    // fields. Carrying them through as parameters would put them in the example twice, in a
+    // form the schema does not have.
+    const params: Record<string, number | string> = {};
+    for (const [key, value] of Object.entries(feature.params)) {
+      if (key === 'operation' || key === 'archetypeId') continue;
+      if (typeof value === 'number' || typeof value === 'string') params[key] = value;
+    }
+
+    components.push({
+      id: feature.id,
+      name: feature.name,
+      role: feature.role ?? '',
+      shape,
+      params,
+      placement: feature.placement ?? IDENTITY_PLACEMENT,
+      ...(feature.placementExpr ? { placementExpr: feature.placementExpr } : {}),
+      material: doc.material,
+      density: doc.density,
+      quantity: 1,
+      operation: feature.params.operation === 'cut' ? 'cut' : 'add',
+    });
+  }
+
+  const plan: AssemblyPlan = {
+    name: doc.name,
+    description: '',
+    parameters: doc.globals.map((g) => ({ ...g })),
+    components,
+    notes: [],
+    source: 'edited',
+  };
+
+  return { plan, excluded };
 }
 
 /** Moves any cut that precedes every additive component to just after the first one. */

@@ -26,7 +26,7 @@
  * but not selectable as the single curved face they ought to be.
  */
 
-import { cross3, len3, norm3, sub3, type Vec3 } from '../kernel/math/vec';
+import { cross3, dot3, len3, mul3, norm3, sub3, type Vec3 } from '../kernel/math/vec';
 import { triCount, type Mesh } from '../kernel/topo/mesh';
 import { meshToBrep, type Brep, type BrepOptions } from './brep';
 
@@ -174,12 +174,23 @@ export function meshToStep(mesh: Mesh, opts: StepOptions = {}): StepResult {
     let geometry: number;
     if (e.curve.kind === 'circle') {
       // The reference direction points at the edge's start vertex, so the circle's parameter
-      // is zero there and increases anticlockwise about the axis. The importer trims between
-      // the two vertices along that parametrisation, which is what makes the arc take the
-      // intended side of the circle rather than the long way round.
+      // is zero there and increases anticlockwise about the axis. A reader trims between the
+      // two vertices along that parametrisation.
+      //
+      // Which means the axis has to be chosen, not copied. Anticlockwise from `a` to `b`
+      // about the recovered axis is sometimes the major arc — and then the file says "go the
+      // long way", the receiving package believes it, and the face comes back inside out or
+      // with no area at all. Every arc this exporter writes is a third of a circle or less,
+      // because circles are split before they are written, so flipping the axis whenever the
+      // sweep exceeds half a turn always names the arc that was meant. Found by importing our
+      // own output: the end caps of a cylinder came back with no area.
       const c = e.curve;
       const ref = norm3(sub3(a, c.centre));
-      geometry = emit(`CIRCLE('',#${placementAt(c.centre, c.axis, ref)},${real(c.radius)})`);
+      const toB = norm3(sub3(b, c.centre));
+      const sweep = Math.atan2(dot3(cross3(ref, toB), c.axis), dot3(ref, toB));
+      const axis = sweep < 0 ? mul3(c.axis, -1) : c.axis;
+
+      geometry = emit(`CIRCLE('',#${placementAt(c.centre, axis, ref)},${real(c.radius)})`);
     } else {
       const d = norm3(sub3(b, a));
       const vec = emit(`VECTOR('',#${direction(d)},${real(len3(sub3(b, a)))})`);

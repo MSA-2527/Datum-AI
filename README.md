@@ -24,10 +24,14 @@ any solid                             →  a dimensioned, toleranced drawing in 
 | **Sketch** | 16 constraint types solved together. Reports under-defined, fully defined, over-defined or contradictory, and names the constraints at fault. | 2D only. |
 | **Generate** | 15 parametric archetypes from plain English, with editable parameters and a real feature tree. Understands units, imperial fractions, ISO fastener designations and capacities. | A finite catalogue. Unrecognised requests are refused with suggestions, not approximated. |
 | **Trace** | Image → closed profile. Otsu threshold, contour tracing with hole nesting, line and arc recognition, symmetry detection. | A scale must be supplied — an image records no size. Silhouette only. |
-| **Import** | DXF → solid, by recognising the views and intersecting their extruded outlines. | Visual hull: an enclosed cavity cannot be seen from outside. Stated in the output. |
+| **Import** | STEP AP203/214 → solid: a Part 21 reader and a B-rep tessellator, no dependency. DXF → solid, by recognising the views and intersecting their extruded outlines. | STEP: planes, cylinders and cones. Splines, tori and spheres are reported and skipped, never approximated. Parts whose cones meet other surfaces come back with hairline cracks and are reported as untrustworthy. DXF: visual hull — an enclosed cavity cannot be seen from outside. |
 | **Draw** | Standard views with true hidden-line removal, automatic dimensions with ISO 2768-m tolerances, grouped hole callouts, GD&T, title block with computed mass. SVG and DXF out. | Envelope and hole pattern. Design-intent dimensions still need an engineer. |
 | **Assemble** | Instances, seven mate types, a mate solver, interference detection that tells a press fit from a clash, mass properties and a bill of materials. | Static. No motion study, no contact simulation. |
-| **Manufacture** | CNC, sheet metal, additive and moulding rule packs; every finding cites its rule. Itemised cost model. | Cost is an estimate for comparing designs, not a quotation. |
+| **Manufacture** | CNC, sheet metal, additive and moulding rule packs; every finding cites its rule. The same limits are stated to the planner *before* it designs, from one definition, so the prompt and the linter cannot disagree. Itemised cost model. | Cost is an estimate for comparing designs, not a quotation. |
+| **Learn** | Your own parts become worked examples: a request, and the plan that answers it. A whole exported folder can be taught in one pass, geometry from the STEP files and requests from the manifest beside them, with an outcome reported for every file. The closest are retrieved and shown to the model at request time, so it builds in your vocabulary and conventions — and every example that steered an answer is named in the reply. Exports as JSONL for a real fine-tune later. | Retrieval, not gradient training: nothing adjusts a model's weights. An example must be expressible as a plan, so parts using sketches or fillets are refused rather than stored half-learnt. |
+| **Recognise** | An imported solid is read back into something editable. A catalogue shape first — parameters derived from the mesh, the archetype rebuilt, the two compared. Failing that, the **extruded profile** itself: the solid is sectioned at every height its cross-section changes, each slab's outline traced, drilled holes recovered as circles with their diameters, and the stack re-extruded and checked. Accepted only at 97% agreement. | Catalogue: box, cylinder, pipe, washer, stepped shaft, hex nut. Profile: parts that section into a handful of constant slabs — a plain plate, a base with pads, a multi-level clip. Beyond a handful of levels a stack of slabs stops describing the design and becomes a voxelisation, and is refused. A solid that imports non-manifold is refused on that ground: a section is only as trustworthy as the solid it is cut from. |
+| **Anodize** | Any part on screen sizes an anodizing rack: wetted area measured off the solid, current from the process density, spine/arm/contact sections from that current, tier count from tank depth, part pitch from solution flow, cooling load in kW and L/min, coating time and the growth that changes the fit. Eight quality checks, each stating its measurement and limit. | Steady-state figures a rack is sized from. No bath chemistry, rectifier ripple, or thermal transient. |
+| **Reuse** | Saved parts are searched *before* anything is generated. A request that matches one is answered with the part rather than a second copy of it, and a stated dimension the saved part does not meet vetoes the match outright. | Local library only. Matching is on words, archetype and stated dimensions — there is no part yet to compare geometry against. |
 
 ---
 
@@ -40,6 +44,26 @@ npm --prefix ui run dev
 
 That is the whole setup. Then type `make a cup`, or `M10 hex nut`, or
 `200 x 120 x 8 plate with 9 mm holes`.
+
+### Deploying it
+
+`npm --prefix ui run build` produces a folder of static files, and that is a complete
+deployment rather than a demo of one — the kernel, the solver and the drafting engine all run
+in the browser. GitHub Pages, an S3 bucket or any file server will do.
+
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) publishes to GitHub Pages on
+every push to `main`, gated on the type check, the test suite and the benchmark.
+
+Two properties make a static host work, and both are load-bearing:
+
+- assets are emitted with **relative** paths (`base: './'`), so the bundle runs from
+  `user.github.io/repo/` without the repository name compiled into it;
+- surfaces are selected with a query string (`?surface=studio`), not a path, so no
+  single-page-app 404 fallback is needed.
+
+What is absent on a static host is the optional half: the SOLIDWORKS connector and the local
+orchestrator. The application detects their absence rather than probing for them, and runs
+the standalone path — which is the free tier, and everything above.
 
 ---
 
@@ -60,9 +84,19 @@ ui/src/kernel/
   ops/modify.ts             Shell, fillet, chamfer, patterns, holes
   assembly/assembly.ts      Instances, mates, interference, BOM
 ui/src/generate/            Text → parametric archetypes
+ui/src/lib/limits.ts        Manufacturing limits as data: enforced by the linter, stated to the planner
+ui/src/lib/library.ts       The named part library, and what was measured when each was saved
+ui/src/lib/reuse.ts         "Have we already made this?", asked before anything is generated
+ui/src/lib/training.ts      Your parts as worked examples, retrieved into the prompt at request time
+ui/src/lib/bulk.ts          A folder of exports taught in one pass, with an outcome per file
 ui/src/ingest/image/        Raster → profile
 ui/src/ingest/drawing/      DXF → solid
+ui/src/ingest/step/         STEP → solid: Part 21 parser, then B-rep to mesh
 ui/src/drafting/            Solid → manufacturing drawing
+ui/src/ingest/fit/          Mesh → archetype or extruded profile: propose, rebuild, verify
+ui/src/domain/anodizing.ts  Rack sizing: area → current → section → cooling, every figure cited
+ui/src/eval/                The benchmark: cases, runner, and the regression gate (npm run eval)
+tools/solidworks/           Batch export from an existing SOLIDWORKS library
 src/DATUM.Kernel/           SOLIDWORKS connector (optional, unverified — see below)
 src/DATUM.Orchestrator/     Local service: planner routing, storage, audit
 ```

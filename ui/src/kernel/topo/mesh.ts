@@ -72,6 +72,76 @@ export function emptyMesh(): Mesh {
   };
 }
 
+// ── persistence ──────────────────────────────────────────────────────────────
+
+/**
+ * A mesh in a form that survives JSON.
+ *
+ * Typed arrays and a `Map` do not: `JSON.stringify` turns a `Float64Array` into an object
+ * keyed by index and a `Map` into `{}`. So this is written out explicitly rather than left to
+ * a structural clone that appears to work until something reads `.length`.
+ *
+ * Everywhere else in the product geometry is derived and never stored — the feature tree is
+ * the document and the mesh is a rebuild of it. An *imported* solid is the one exception the
+ * rule cannot cover: it was traced or reconstructed from something outside, and there is no
+ * tree that reproduces it. Dropping it on save is therefore not a tidy application of the
+ * rule, it is losing the part.
+ */
+export interface SerialisedMesh {
+  positions: number[];
+  indices: number[];
+  faceIds: number[];
+  tags: FaceTag[];
+}
+
+/**
+ * Positions are rounded to a ten-thousandth of a millimetre.
+ *
+ * A hundred nanometres is two orders of magnitude finer than any machining tolerance and four
+ * finer than the tessellation error already present, so nothing measurable is lost — and full
+ * float precision costs roughly twice the characters, against a browser storage quota that a
+ * few hundred imported parts will otherwise reach.
+ */
+const SCALE = 1e4;
+
+export function serialiseMesh(m: Mesh): SerialisedMesh {
+  const positions = new Array<number>(m.positions.length);
+  for (let i = 0; i < m.positions.length; i++) {
+    positions[i] = Math.round(m.positions[i]! * SCALE) / SCALE;
+  }
+
+  return {
+    positions,
+    indices: Array.from(m.indices),
+    faceIds: Array.from(m.faceIds),
+    tags: [...m.tags.values()],
+  };
+}
+
+/** `null` for anything that is not a mesh this build wrote, rather than a half-built one. */
+export function deserialiseMesh(value: unknown): Mesh | null {
+  const raw = value as SerialisedMesh;
+  if (!raw || !Array.isArray(raw.positions) || !Array.isArray(raw.indices)) return null;
+  if (raw.positions.length % 3 !== 0 || raw.indices.length % 3 !== 0) return null;
+
+  const faceIds = Array.isArray(raw.faceIds) && raw.faceIds.length === raw.indices.length / 3
+    ? Uint32Array.from(raw.faceIds)
+    : new Uint32Array(raw.indices.length / 3);
+
+  const tags = new Map<number, FaceTag>();
+  for (const tag of Array.isArray(raw.tags) ? raw.tags : []) {
+    if (tag && typeof tag.id === 'number') tags.set(tag.id, tag);
+  }
+
+  return {
+    positions: Float64Array.from(raw.positions),
+    indices: Uint32Array.from(raw.indices),
+    faceIds,
+    tags,
+  };
+}
+
+
 // ── builder ──────────────────────────────────────────────────────────────────
 
 /**

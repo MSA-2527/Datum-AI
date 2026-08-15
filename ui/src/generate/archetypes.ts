@@ -1643,9 +1643,15 @@ const RACK_PARAMS: ParamSpec[] = [
   P('tipsPerArm', 'Contact tips per arm', 4, 1, 40, 'count'),
   P('tipLength', 'Contact tip length', 35, 5, 200, 'mm',
     'The sprung finger that grips the part and carries the current into it.'),
-  P('tipDia', 'Contact tip diameter', 4, 1, 30),
+  P('tipDia', 'Contact tip diameter', 4.5, 1, 30, 'mm',
+    'Sized on the contact interface rather than the tip metal: 8 A through 0.6 A/mm² of '
+    + 'aluminium needs 13.3 mm², which is ⌀4.2 mm. 4 mm was marginally under and the default '
+    + 'rack failed its own contact check.'),
   P('hookDia', 'Hook bar diameter', 14, 4, 60, 'mm',
     'Sits over the tank flight bar, so it must clear that bar.'),
+  P('ampsPerPart', 'Current per part', 8, 0.1, 200, 'count',
+    'Amps drawn by one part: its wetted area times the process current density. 8 A is a '
+    + 'placeholder for a part nobody has measured; sizing a rack from it is a guess.'),
 ];
 
 /**
@@ -1675,10 +1681,15 @@ function buildRack(given: Record<string, number>): ArchetypeResult {
   // ── electrical sizing ──
   //
   // Titanium carries roughly 1 A/mm² in a plating rack before self-heating becomes a problem.
-  // A part being anodized draws about 1.5 A/dm² of surface; without knowing the parts, the
-  // check is made per contact, which is the section that fails first.
+  //
+  // The current each part draws is a *parameter* rather than an assumption, because it is not
+  // a property of the rack: it is the part's wetted area times the process current density,
+  // and the two differ by an order of magnitude across real work. The default of 8 A stands in
+  // for a part nobody has measured. `domain/anodizing.ts` measures the part and supplies the
+  // real figure — and passing it here is what makes these warnings agree with the sizing that
+  // produced the rack, instead of contradicting it.
   const AMPS_PER_MM2 = 1.0;
-  const AMPS_PER_TIP = 8;
+  const AMPS_PER_TIP = p.ampsPerPart;
 
   const spineSection = p.spineWidth * p.spineThickness;
   const armSection = p.armWidth * p.armThickness;
@@ -1702,10 +1713,14 @@ function buildRack(given: Record<string, number>): ArchetypeResult {
     );
   }
 
-  if (tipSection * AMPS_PER_MM2 < AMPS_PER_TIP) {
+  // The contact is limited by the aluminium it presses against, not the titanium it is made
+  // of — the aluminium softens first, resistance climbs, and the part arcs off the rack.
+  const CONTACT_A_PER_MM2 = 0.6;
+  if (tipSection * CONTACT_A_PER_MM2 < AMPS_PER_TIP) {
     warnings.push(
-      `A ${p.tipDia} mm contact tip is ${tipSection.toFixed(1)} mm² for about ${AMPS_PER_TIP} A. ` +
-      'Thin tips burn at the contact point and mark the part.',
+      `A ${p.tipDia} mm contact tip is ${tipSection.toFixed(1)} mm² for about ` +
+      `${AMPS_PER_TIP.toFixed(1)} A, which is ${(AMPS_PER_TIP / tipSection).toFixed(2)} A/mm². ` +
+      `Above ${CONTACT_A_PER_MM2} A/mm² the part burns at the contact and marks.`,
     );
   }
 

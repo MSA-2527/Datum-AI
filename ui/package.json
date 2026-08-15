@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
+    "eval": "vitest run --config vitest.eval.config.ts --reporter=basic",
     "test:watch": "vitest",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"

@@ -1,0 +1,244 @@
+' DATUM — batch export from SOLIDWORKS
+'
+' Converts a folder of SOLIDWORKS files into the formats DATUM can read, and writes a
+' manifest describing what came out.
+'
+' WHY THIS EXISTS
+'
+' .sldprt, .sldasm, .slddrw and .dwg are proprietary binary formats. Nothing outside
+' SOLIDWORKS and a licensed translator can read them — not a browser, not this project, not
+' any amount of effort short of licensing the ODA toolkit. That is a fact about the formats,
+' not a limitation anyone chose, and the honest way around it is to use the seat you already
+' have to convert once.
+'
+' So this runs inside SOLIDWORKS, where those files are readable, and writes:
+'
+'   *.slddrw  ->  .dxf    Read by DATUM today. Multi-view drawings are reconstructed into
+'                         solids by recognising the views and intersecting their outlines.
+'   *.sldprt  ->  .step   AP214, with faces and edges. Read by DATUM when the STEP importer
+'   *.sldasm  ->  .step   lands; exported now so this only has to be run once.
+'   *.dwg     ->  .dxf    Opened as a drawing and re-saved in the ASCII interchange format.
+'
+'   manifest.csv          One row per file: source path, export path, part number, revision,
+'                         description, material and mass. This is what turns a folder of
+'                         geometry into training material — the description column is the
+'                         request half of an example, and there is no way to recover it from
+'                         the geometry afterwards.
+'
+' USAGE
+'
+'   1. In SOLIDWORKS: Tools > Macro > New, paste this file, save it as BatchExport.swp.
+'   2. Set SOURCE_FOLDER and OUTPUT_FOLDER below.
+'   3. Tools > Macro > Run.
+'
+' It opens each file read-only and closes it again. Nothing is modified, nothing is saved
+' back over a source file, and a file that fails to open is recorded in the manifest with the
+' reason rather than stopping the run — a batch that aborts on file 40 of 900 is a batch
+' nobody finishes.
+
+Option Explicit
+
+' ── settings ────────────────────────────────────────────────────────────────
+
+Const SOURCE_FOLDER As String = "C:\Engineering\Library"
+Const OUTPUT_FOLDER As String = "C:\Engineering\DATUM-export"
+
+' Sub-folders are walked too. Set False to take only the top level.
+Const RECURSE As Boolean = True
+
+' Drawings are the only export DATUM reads today. Parts and assemblies are exported as STEP
+' for the importer that is coming; set False to skip them and finish sooner.
+Const EXPORT_SOLIDS As Boolean = True
+
+' ── state ───────────────────────────────────────────────────────────────────
+
+Dim swApp As SldWorks.SldWorks
+Dim fso As Object
+Dim manifest As Object
+Dim countOk As Long
+Dim countFailed As Long
+
+Sub main()
+    Set swApp = Application.SldWorks
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FolderExists(SOURCE_FOLDER) Then
+        MsgBox "Source folder not found: " & SOURCE_FOLDER, vbExclamation
+        Exit Sub
+    End If
+
+    If Not fso.FolderExists(OUTPUT_FOLDER) Then fso.CreateFolder OUTPUT_FOLDER
+
+    ' AP214 carries colour and assembly structure; AP203 does not. Both import, and the
+    ' difference is only visible once you have opened the result and found the structure gone.
+    swApp.SetUserPreferenceIntegerValue swUserPreferenceIntegerValue_e.swStepAP, 214
+
+    ' The DXF DATUM reads is the flat interchange format, so splines are output as they are
+    ' rather than as proxy entities an ASCII reader cannot resolve.
+    swApp.SetUserPreferenceIntegerValue swUserPreferenceIntegerValue_e.swDxfVersion, 0
+
+    Set manifest = fso.CreateTextFile(fso.BuildPath(OUTPUT_FOLDER, "manifest.csv"), True)
+    manifest.WriteLine "source,export,kind,partNumber,revision,description,material,massGrams,status"
+
+    countOk = 0
+    countFailed = 0
+
+    ProcessFolder SOURCE_FOLDER
+
+    manifest.Close
+
+    MsgBox countOk & " exported, " & countFailed & " failed." & vbCrLf & vbCrLf & _
+           "Written to " & OUTPUT_FOLDER & vbCrLf & _
+           "Read manifest.csv before importing — the description column is what makes an " & _
+           "example teachable.", vbInformation, "DATUM batch export"
+End Sub
+
+' ── walking ─────────────────────────────────────────────────────────────────
+
+Sub ProcessFolder(ByVal folderPath As String)
+    Dim folder As Object, file As Object, sub_ As Object
+    Set folder = fso.GetFolder(folderPath)
+
+    For Each file In folder.Files
+        Dim ext As String
+        ext = LCase(fso.GetExtensionName(file.Path))
+
+        Select Case ext
+            Case "slddrw":  ExportOne file.Path, swDocumentTypes_e.swDocDRAWING, "dxf", "drawing"
+            Case "dwg":     ExportOne file.Path, swDocumentTypes_e.swDocDRAWING, "dxf", "drawing"
+            Case "sldprt":  If EXPORT_SOLIDS Then ExportOne file.Path, swDocumentTypes_e.swDocPART, "step", "part"
+            Case "sldasm":  If EXPORT_SOLIDS Then ExportOne file.Path, swDocumentTypes_e.swDocASSEMBLY, "step", "assembly"
+        End Select
+    Next
+
+    If RECURSE Then
+        For Each sub_ In folder.SubFolders
+            ' Never walk into our own output, which would export the exports.
+            If LCase(sub_.Path) <> LCase(OUTPUT_FOLDER) Then ProcessFolder sub_.Path
+        Next
+    End If
+End Sub
+
+' ── one file ────────────────────────────────────────────────────────────────
+
+Sub ExportOne(ByVal srcPath As String, ByVal docType As Long, _
+              ByVal outExt As String, ByVal kind As String)
+
+    Dim swModel As SldWorks.ModelDoc2
+    Dim openErrors As Long, openWarnings As Long
+    Dim saveErrors As Long, saveWarnings As Long
+    Dim outPath As String
+
+    ' Read-only and silent. Read-only so a batch can never write to the library it is reading,
+    ' and silent so a single dialog — a missing reference, an out-of-date rebuild — cannot
+    ' stop a run of nine hundred files at three in the morning.
+    Set swModel = swApp.OpenDoc6(srcPath, docType, _
+        swOpenDocOptions_e.swOpenDocOptions_ReadOnly + swOpenDocOptions_e.swOpenDocOptions_Silent, _
+        "", openErrors, openWarnings)
+
+    If swModel Is Nothing Then
+        WriteRow srcPath, "", kind, "", "", "", "", "", "could not open (error " & openErrors & ")"
+        countFailed = countFailed + 1
+        Exit Sub
+    End If
+
+    outPath = UniqueOutputPath(srcPath, outExt)
+
+    ' SaveAs infers the translator from the extension. Silent, and warnings are captured and
+    ' reported rather than discarded — a drawing exported with its sheet format missing is
+    ' still a file, and finding that out at import time wastes the trip.
+    If swModel.Extension.SaveAs(outPath, 0, swSaveAsOptions_e.swSaveAsOptions_Silent, _
+                                Nothing, saveErrors, saveWarnings) Then
+        WriteRow srcPath, outPath, kind, _
+                 Prop(swModel, "PartNo"), Prop(swModel, "Revision"), Prop(swModel, "Description"), _
+                 MaterialOf(swModel), MassOf(swModel), _
+                 IIf(saveWarnings = 0, "ok", "ok (warning " & saveWarnings & ")")
+        countOk = countOk + 1
+    Else
+        WriteRow srcPath, "", kind, "", "", "", "", "", "export failed (error " & saveErrors & ")"
+        countFailed = countFailed + 1
+    End If
+
+    swApp.CloseDoc swModel.GetTitle
+End Sub
+
+' Two parts of the same name in different folders must not overwrite each other.
+Function UniqueOutputPath(ByVal srcPath As String, ByVal outExt As String) As String
+    Dim base As String, candidate As String, n As Long
+    base = fso.GetBaseName(srcPath)
+    candidate = fso.BuildPath(OUTPUT_FOLDER, base & "." & outExt)
+
+    n = 1
+    Do While fso.FileExists(candidate)
+        n = n + 1
+        candidate = fso.BuildPath(OUTPUT_FOLDER, base & "_" & n & "." & outExt)
+    Loop
+
+    UniqueOutputPath = candidate
+End Function
+
+' ── properties ──────────────────────────────────────────────────────────────
+
+' Configuration-specific properties first, then file-level. A part number is very often set
+' per configuration, and reading only the file level returns empty for exactly the parts that
+' are managed most carefully.
+Function Prop(ByVal swModel As SldWorks.ModelDoc2, ByVal name As String) As String
+    Dim mgr As SldWorks.CustomPropertyManager
+    Dim value As String, resolved As String
+
+    On Error Resume Next
+
+    Set mgr = swModel.Extension.CustomPropertyManager(swModel.ConfigurationManager.ActiveConfiguration.name)
+    mgr.Get4 name, False, value, resolved
+    If Len(resolved) = 0 Then
+        Set mgr = swModel.Extension.CustomPropertyManager("")
+        mgr.Get4 name, False, value, resolved
+    End If
+
+    Prop = Clean(resolved)
+    On Error GoTo 0
+End Function
+
+Function MaterialOf(ByVal swModel As SldWorks.ModelDoc2) As String
+    Dim database As String
+    On Error Resume Next
+    If swModel.GetType = swDocumentTypes_e.swDocPART Then
+        MaterialOf = Clean(swModel.GetMaterialPropertyName2("", database))
+    End If
+    On Error GoTo 0
+End Function
+
+Function MassOf(ByVal swModel As SldWorks.ModelDoc2) As String
+    Dim ext As SldWorks.ModelDocExtension
+    Dim massProps As Variant
+
+    On Error Resume Next
+    If swModel.GetType = swDocumentTypes_e.swDocDRAWING Then Exit Function
+
+    Set ext = swModel.Extension
+    massProps = ext.GetMassProperties2(1, Empty, False)
+    ' Index 5 is mass in kilograms.
+    If IsArray(massProps) Then MassOf = Format(massProps(5) * 1000#, "0.0")
+    On Error GoTo 0
+End Function
+
+' ── manifest ────────────────────────────────────────────────────────────────
+
+Sub WriteRow(ByVal src As String, ByVal out As String, ByVal kind As String, _
+             ByVal partNo As String, ByVal rev As String, ByVal desc As String, _
+             ByVal material As String, ByVal mass As String, ByVal status As String)
+
+    manifest.WriteLine Quote(src) & "," & Quote(out) & "," & Quote(kind) & "," & _
+                       Quote(partNo) & "," & Quote(rev) & "," & Quote(desc) & "," & _
+                       Quote(material) & "," & Quote(mass) & "," & Quote(status)
+End Sub
+
+' RFC 4180: wrap every field and double any quote inside it. Descriptions contain commas far
+' more often than anyone expects, and an unquoted one silently shifts every later column.
+Function Quote(ByVal s As String) As String
+    Quote = """" & Replace(s, """", """""") & """"
+End Function
+
+Function Clean(ByVal s As String) As String
+    Clean = Trim(Replace(Replace(s, vbCr, " "), vbLf, " "))
+End Function

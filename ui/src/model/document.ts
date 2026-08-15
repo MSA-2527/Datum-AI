@@ -22,7 +22,8 @@ import {
   type Mat4, type Vec2, type Vec3,
 } from '../kernel/math/vec';
 import {
-  bounds, concatMeshes, getTriangle, health, massProperties, transformMesh, triCount,
+  bounds, concatMeshes, deserialiseMesh, getTriangle, health, massProperties, serialiseMesh,
+  transformMesh, triCount,
   type Mesh, type MeshHealth,
 } from '../kernel/topo/mesh';
 import {
@@ -1116,15 +1117,37 @@ export function defaultParams(kind: FeatureKind): Record<string, ParamValue> {
  * megabytes of triangles, and a save format that grows without bound is one users learn to
  * avoid. The feature stays in the tree with a note so nothing disappears silently.
  */
+/**
+ * The document as text.
+ *
+ * Schema 3 writes imported geometry out instead of discarding it. Schema 2 replaced an
+ * imported feature's mesh with `__dropped: true`, on the reasoning that geometry is derived
+ * and the tree is the document — which is right for every feature that has a tree to rebuild
+ * from, and exactly wrong for the one kind that does not. A traced photograph or a
+ * reconstructed drawing has no recipe behind it, so dropping the mesh did not defer the work,
+ * it lost the part: saving and reopening produced "the imported geometry is missing" and an
+ * empty viewport.
+ *
+ * That made the whole import path unusable for its actual purpose. Bringing a library of
+ * drawings in is worth nothing if none of them can be saved afterwards.
+ */
 export function serialise(doc: Document): string {
   return JSON.stringify({
-    schema: 2,
+    schema: 3,
     ...doc,
-    features: doc.features.map((f) =>
-      f.kind === 'imported'
-        ? { ...f, params: { ...f.params, __mesh: undefined, __dropped: true } }
-        : f,
-    ),
+    features: doc.features.map((f) => {
+      if (f.kind !== 'imported') return f;
+      const mesh = f.params.__mesh as unknown;
+      return {
+        ...f,
+        params: {
+          ...f.params,
+          __mesh: mesh && typeof mesh === 'object'
+            ? serialiseMesh(mesh as Mesh)
+            : undefined,
+        },
+      };
+    }),
   });
 }
 
@@ -1141,8 +1164,26 @@ export function deserialise(text: string): Document | null {
       units: raw.units ?? 'mm',
       material: raw.material ?? 'Aluminium 6061-T6',
       density: raw.density ?? 2.7,
+      // Carried through rather than recomputed. An assembly's mass is summed from components
+      // weighed at their own densities; dropping it on read meant a reopened phone was
+      // re-weighed as if it were solid aluminium, which is the one number that gives a model
+      // away as fake.
+      ...(typeof raw.knownMassGrams === 'number' ? { knownMassGrams: raw.knownMassGrams } : {}),
       globals: raw.globals ?? [],
-      features: raw.features.map((f) => ({ ...f, suppressed: f.suppressed ?? false })),
+      features: raw.features.map((f): Feature => {
+        const feature: Feature = { ...f, suppressed: f.suppressed ?? false };
+        if (feature.kind !== 'imported') return feature;
+
+        // Rebuilt into typed arrays. A schema-2 document has nothing to rebuild from — the
+        // mesh was discarded on save — so it keeps its `__dropped` marker and the evaluator
+        // reports the geometry as missing, which is the truth about that file.
+        const mesh = deserialiseMesh(feature.params.__mesh);
+        const params: Record<string, ParamValue> = { ...feature.params };
+        if (mesh) params.__mesh = mesh as unknown as ParamValue;
+        else { delete params.__mesh; params.__dropped = true; }
+
+        return { ...feature, params };
+      }),
       mates: Array.isArray(raw.mates) ? raw.mates : [],
     };
   } catch {

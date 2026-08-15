@@ -1,0 +1,17 @@
+{
+  "note": "Committed scores for the deterministic benchmark. A case that passed here and fails now is a regression and fails the build. Raise these figures when the product genuinely improves; never lower one to make a build green.",
+  "recordedUtc": "2026-08-14",
+  "score": 1,
+  "cases": {
+    "plate-stated": true,
+    "plate-imperial": true,
+    "nut-m10": true,
+    "cup": true,
+    "cup-sized": true,
+    "phone": true,
+    "gearbox": true,
+    "bicycle": true,
+    "motor": true,
+    "refusal": true
+  }
+}

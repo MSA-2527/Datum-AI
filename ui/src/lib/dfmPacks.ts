@@ -1,5 +1,6 @@
 import type { DfmFinding } from './dfm';
 import type { Geometry, PartDoc } from './partModel';
+import { ADDITIVE, MOULDING, SHEET } from './limits';
 
 /**
  * Process-specific manufacturability rule packs.
@@ -36,21 +37,22 @@ export function analyseSheetMetal(
   const { t, bendRadius } = p;
 
   // Bend radius below material thickness cracks the outer fibre on most alloys.
-  if (bendRadius < t * 0.8) {
+  if (bendRadius < t * SHEET.minBendRadiusRatio) {
     out.push({
       id: 'sm-bend-radius',
       severity: 'blocker',
       rule: 'dfm.sheet.min-bend-radius',
       title: `Inside bend radius ${bendRadius.toFixed(2)} mm is tighter than the material`,
       detail:
-        `Bending below roughly 0.8× thickness (${(t * 0.8).toFixed(2)} mm here) stretches the ` +
+        `Bending below roughly ${SHEET.minBendRadiusRatio}× thickness ` +
+        `(${(t * SHEET.minBendRadiusRatio).toFixed(2)} mm here) stretches the ` +
         'outer fibre past its elongation limit. Aluminium cracks; steel thins and springs unpredictably.',
       remedy: `Open the inside radius to at least ${t.toFixed(2)} mm.`,
     });
   }
 
   // Holes too close to a bend distort into ovals as the material draws in.
-  const minHoleToBend = t * 2.5 + bendRadius;
+  const minHoleToBend = t * SHEET.holeToBendThicknesses + bendRadius;
   for (const hole of geom.holes) {
     const toEdge = Math.min(
       geom.L / 2 - Math.abs(hole.x) - hole.d / 2,
@@ -63,7 +65,7 @@ export function analyseSheetMetal(
         rule: 'dfm.sheet.hole-to-bend',
         title: `Hole sits ${toEdge.toFixed(1)} mm from the edge, inside the bend zone`,
         detail:
-          `A hole within ${minHoleToBend.toFixed(1)} mm (2.5t + radius) of a bend line draws into ` +
+          `A hole within ${minHoleToBend.toFixed(1)} mm (${SHEET.holeToBendThicknesses}t + radius) of a bend line draws into ` +
           'an oval as the material forms. The feature will not be round after bending.',
         remedy: 'Move the hole inboard, or pierce it after forming.',
         costImpact: 15,
@@ -73,7 +75,7 @@ export function analyseSheetMetal(
   }
 
   // A flange shorter than about 4× thickness cannot be gripped by the press brake.
-  const minFlange = t * 4 + bendRadius;
+  const minFlange = t * SHEET.minFlangeThicknesses + bendRadius;
   if (Math.min(geom.L, geom.W) < minFlange * 2) {
     out.push({
       id: 'sm-flange-length',
@@ -81,14 +83,14 @@ export function analyseSheetMetal(
       rule: 'dfm.sheet.min-flange',
       title: `Part is too narrow for a ${minFlange.toFixed(1)} mm minimum flange`,
       detail:
-        'A flange shorter than roughly 4t + radius cannot be held by the press-brake tooling; ' +
+        `A flange shorter than roughly ${SHEET.minFlangeThicknesses}t + radius cannot be held by the press-brake tooling; ` +
         'it slips during forming and the bend angle drifts.',
       remedy: 'Increase the part width, or form it as two pieces.',
     });
   }
 
   // Uniform thickness is a hard constraint: sheet metal is cut from one sheet.
-  if (geom.shellWall !== null && Math.abs(geom.shellWall - t) > 0.01) {
+  if (geom.shellWall !== null && Math.abs(geom.shellWall - t) > SHEET.thicknessToleranceMm) {
     out.push({
       id: 'sm-thickness',
       severity: 'blocker',
@@ -119,7 +121,7 @@ export function analyseAdditive(_doc: PartDoc, geom: Geometry, p: AdditiveParams
   const out: DfmFinding[] = [];
 
   // A wall thinner than two extrusion widths has no interior and delaminates.
-  const minWall = p.nozzle * 2;
+  const minWall = p.nozzle * ADDITIVE.minWallNozzles;
   if (geom.shellWall !== null && geom.shellWall < minWall) {
     out.push({
       id: 'am-min-wall',
@@ -128,23 +130,23 @@ export function analyseAdditive(_doc: PartDoc, geom: Geometry, p: AdditiveParams
       title: `Wall of ${geom.shellWall.toFixed(2)} mm is below two extrusion widths`,
       detail:
         `With a ${p.nozzle} mm nozzle the thinnest printable wall is about ${minWall.toFixed(2)} mm. ` +
-        'Thinner than that the slicer produces a single unbonded bead that peels apart.',
+        `Thinner than ${ADDITIVE.minWallNozzles} extrusion widths the slicer produces a single unbonded bead that peels apart.`,
       remedy: `Increase the wall to at least ${minWall.toFixed(2)} mm.`,
     });
   }
 
   // Small holes print undersize because of elephant-foot and bead overlap.
   for (const hole of geom.holes) {
-    if (hole.d < p.nozzle * 4) {
+    if (hole.d < p.nozzle * ADDITIVE.minHoleNozzles) {
       out.push({
         id: 'am-small-hole',
         severity: 'warning',
         rule: 'dfm.additive.min-hole',
         title: `⌀${hole.d.toFixed(1)} mm hole will print undersize`,
         detail:
-          'Below roughly four nozzle diameters, bead overlap closes the hole in. Expect it to ' +
+          `Below roughly ${ADDITIVE.minHoleNozzles} nozzle diameters, bead overlap closes the hole in. Expect it to ` +
           'come out 0.2–0.4 mm small and need drilling.',
-        remedy: `Increase to ⌀${(p.nozzle * 4).toFixed(1)} mm, or plan to ream after printing.`,
+        remedy: `Increase to ⌀${(p.nozzle * ADDITIVE.minHoleNozzles).toFixed(1)} mm, or plan to ream after printing.`,
         costImpact: 6,
       });
       break;
@@ -153,7 +155,7 @@ export function analyseAdditive(_doc: PartDoc, geom: Geometry, p: AdditiveParams
 
   // A flat plate is fine; a tall thin one warps off the bed.
   const aspect = Math.max(geom.L, geom.W) / Math.max(geom.T, 0.01);
-  if (aspect > 60) {
+  if (aspect > ADDITIVE.maxFlatAspect) {
     out.push({
       id: 'am-warp',
       severity: 'warning',
@@ -197,21 +199,21 @@ export function analyseMoulding(_doc: PartDoc, geom: Geometry, p: MouldingParams
   const out: DfmFinding[] = [];
 
   // No draft means the part cannot leave the tool without scoring.
-  if (p.draft < 0.5) {
+  if (p.draft < MOULDING.minDraftDeg) {
     out.push({
       id: 'im-draft',
       severity: 'blocker',
       rule: 'dfm.mould.draft',
       title: `Draft of ${p.draft.toFixed(1)}° is insufficient to eject the part`,
       detail:
-        'A moulded face needs at least 0.5° per side — 1° for a textured face — or it drags ' +
+        `A moulded face needs at least ${MOULDING.minDraftDeg}° per side — ${MOULDING.recommendedDraftDeg}° for a textured face — or it drags ` +
         'against the tool steel on ejection and scores.',
-      remedy: 'Add 1° draft to all vertical faces.',
+      remedy: `Add ${MOULDING.recommendedDraftDeg}° draft to all vertical faces.`,
     });
   }
 
   // Thick sections cool last and sink; the rule of thumb is ±25% of nominal.
-  if (geom.T > p.nominalWall * 1.25) {
+  if (geom.T > p.nominalWall * (1 + MOULDING.maxWallVariation)) {
     out.push({
       id: 'im-thick',
       severity: 'warning',
@@ -226,7 +228,7 @@ export function analyseMoulding(_doc: PartDoc, geom: Geometry, p: MouldingParams
   }
 
   // Sharp internal corners concentrate stress and resist flow.
-  if (geom.cornerR > 0 && geom.cornerR < p.nominalWall * 0.25) {
+  if (geom.cornerR > 0 && geom.cornerR < p.nominalWall * MOULDING.minCornerRadiusRatio) {
     out.push({
       id: 'im-corner',
       severity: 'warning',
@@ -235,21 +237,21 @@ export function analyseMoulding(_doc: PartDoc, geom: Geometry, p: MouldingParams
       detail:
         'Internal radii below about a quarter of the wall concentrate stress and choke melt flow. ' +
         'Parts crack at the corner in service.',
-      remedy: `Increase to at least ${(p.nominalWall * 0.5).toFixed(2)} mm.`,
+      remedy: `Increase to at least ${(p.nominalWall * MOULDING.recommendedCornerRadiusRatio).toFixed(2)} mm.`,
     });
   }
 
   // A slot whose walls are thinner than the nominal wall will not fill.
-  if (geom.slot && geom.slot.h < p.nominalWall * 0.6) {
+  if (geom.slot && geom.slot.h < p.nominalWall * MOULDING.minRibProportion) {
     out.push({
       id: 'im-thin-rib',
       severity: 'warning',
       rule: 'dfm.mould.rib-proportion',
-      title: `Feature ${geom.slot.h.toFixed(1)} mm wide is below 60% of the nominal wall`,
+      title: `Feature ${geom.slot.h.toFixed(1)} mm wide is below ${MOULDING.minRibProportion * 100}% of the nominal wall`,
       detail:
         'Thin features freeze off before the cavity fills, leaving a short shot. Ribs should be ' +
         '50–60% of the wall they attach to — thicker sinks, thinner will not fill.',
-      remedy: `Widen to about ${(p.nominalWall * 0.6).toFixed(1)} mm.`,
+      remedy: `Widen to about ${(p.nominalWall * MOULDING.minRibProportion).toFixed(1)} mm.`,
     });
   }
 

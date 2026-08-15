@@ -22,6 +22,10 @@ export default defineConfig({
     // jsdom because persistence touches localStorage and the exporters touch Blob/URL.
     environment: 'jsdom',
     include: ['src/**/*.test.ts'],
+    // The readable report is excluded from the ordinary suite — it asserts nothing and would
+    // print a table on every commit. `npm run eval` runs it through `vitest.eval.config.ts`.
+    // The regression gate that *does* assert, `src/eval/eval.test.ts`, stays in.
+    exclude: ['**/node_modules/**', '**/dist/**', 'src/eval/report.test.ts'],
     restoreMocks: true,
     // Loads the WASM boolean engine before any test. Without it the suite measures the BSP
     // fallback rather than the engine the application actually ships.

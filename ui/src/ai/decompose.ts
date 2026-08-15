@@ -30,6 +30,8 @@ import {
   type AssemblyPlan,
 } from '../assembly/plan';
 import { addFeature, emptyDocument, type Document, type ParamValue } from '../model/document';
+import { constraintBrief } from '../lib/limits';
+import { exemplarBlock, exemplarsFor } from '../lib/training';
 import { expandQuery, referenceBlock } from '../reference/retrieve';
 import { auditPlan, summariseAudit, type Finding } from '../reference/audit';
 import { critique, repairPrompt, summariseCritique, type Critique } from './critique';
@@ -73,7 +75,7 @@ export type DecomposeResult = DecomposeSuccess | DecomposeFailure;
  * than described, so the model is choosing from a list it can see rather than guessing at an
  * API. That single decision removes most of the ways a generated plan can be unbuildable.
  */
-export function buildSystemPrompt(reference = ''): string {
+export function buildSystemPrompt(reference = '', exemplars = ''): string {
   const shapes = ARCHETYPES.map((a) => {
     const params = a.defaults
       .map((d) => `${d.key}(${d.min}-${d.max}${d.unit === 'count' ? '' : d.unit})`)
@@ -85,6 +87,13 @@ export function buildSystemPrompt(reference = ''): string {
   // in order and the numbers have to be in hand before it starts filling in fields; put them
   // at the end and it has already committed to a set of remembered dimensions by the time it
   // reaches them.
+  //
+  // The manufacturing limits go at the *end*, for the opposite reason and it is not a
+  // contradiction. Reference dimensions decide what the object is — they have to be settled
+  // before anything else. The limits decide whether a number that has already been chosen is
+  // allowed to stand, which is the last judgement made about each field, so they belong where
+  // they are freshest. See `lib/limits.ts` for why they are stated up front at all rather
+  // than left to the linter.
   const grounding = reference ? `${reference}\n\n` : '';
 
   return `You are a mechanical design assistant. You decompose an object into the parts it is
@@ -175,7 +184,9 @@ RULES:
 - Where a REFERENCE DIMENSIONS entry above covers a part you are placing, its figures are
   authoritative. Use them unchanged and name the standard in that component's "note". If you
   believe a reference figure is wrong for this design, say so in "notes" rather than silently
-  using a different number.`;
+  using a different number.
+
+${constraintBrief()}${exemplars ? `\n\n${exemplars}` : ''}`;
 }
 
 // ── the entry point ──────────────────────────────────────────────────────────
@@ -307,6 +318,13 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
   // merely plausible.
   const reference = referenceBlock(expandQuery(text));
 
+  // The examples this organisation has taught, most relevant first. Retrieval rather than a
+  // fixed set: showing a model a gearbox while it is being asked for a bracket teaches it to
+  // answer with a gearbox, and an irrelevant example is worse than none because the model
+  // will try to follow it. See `lib/training.ts`.
+  const taught = exemplarsFor(text);
+  const exemplars = exemplarBlock(taught.examples);
+
   // Plan, build, inspect, and — when inspection finds real problems — hand them back and ask
   // for a correction. This is the loop that separates a generator from a designer: the first
   // attempt is a draft, and the second one has been told what was wrong with it.
@@ -327,7 +345,7 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
   const study = await studyObject(opts, reference, text);
 
   let attempt = await askForPlan(
-    opts, reference,
+    opts, reference, exemplars,
     study
       ? `${study}\n\nNow express exactly that as the JSON plan. Every part named above must ` +
         `appear as a component with real dimensions. Do not reduce the part count.`
@@ -339,7 +357,7 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
   let inspected = critique(attempt.plan);
 
   if (inspected.some((c) => c.severity === 'error')) {
-    const second = await askForPlan(opts, reference, repairPrompt(attempt.plan, inspected));
+    const second = await askForPlan(opts, reference, exemplars, repairPrompt(attempt.plan, inspected));
 
     // A correction is kept only if it is actually better. A model asked to fix four problems
     // can return something with six, and shipping that because it was newer would make the
@@ -378,6 +396,15 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
 
   if (repaired) {
     parts.push('The first attempt had problems the inspection caught, so it was sent back and corrected.');
+  }
+
+  // Named, not merely counted. An example that steered the answer is something the user can
+  // go and look at — and delete, if it steered it wrongly.
+  if (taught.examples.length > 0) {
+    parts.push(
+      `Guided by your own ${taught.examples.length === 1 ? 'part' : 'parts'}: ` +
+      `${taught.examples.map((e) => `"${e.prompt}"`).join(', ')}.`,
+    );
   }
 
   const inspection = summariseCritique(inspected);
@@ -450,10 +477,10 @@ async function studyObject(
 }
 
 async function askForPlan(
-  opts: DecomposeOptions, reference: string, user: string,
+  opts: DecomposeOptions, reference: string, exemplars: string, user: string,
 ): Promise<PlanAttempt> {
   const reply = await complete(opts.config, {
-    system: buildSystemPrompt(reference),
+    system: buildSystemPrompt(reference, exemplars),
     user,
     // A car or an engine is 25 to 60 components, and each carries a name, a role, six
     // placement numbers and a note. At 4 000 those plans came back truncated — which is one
