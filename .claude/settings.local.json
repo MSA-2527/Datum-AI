@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:www.codestack.net)",
+      "Bash(python -)",
+      "Bash(npx tsc *)",
+      "Bash(timeout 300 npx vitest run src/generate/generate.test.ts)"
+    ]
+  }
+}
