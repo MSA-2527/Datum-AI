@@ -21,16 +21,52 @@ import { IDENTITY_PLACEMENT, type AssemblyPlan, type ComponentSpec } from './pla
 
 let seq = 0;
 
+/**
+ * Gives a primitive component a proportionate edge break, unless it names its own.
+ *
+ * Applied here rather than at seventy-odd call sites, because it is not a decision anyone
+ * makes per part: real components have broken edges, and a recipe that had to remember to say
+ * so for each one would forget. A twentieth of the smallest dimension is a radius that reads
+ * at the scale of the part it is on — half a millimetre on a phone bezel, two hundred on a
+ * fuselage — which a single fixed number cannot do across four orders of magnitude.
+ *
+ * Boxes only, and that is a cost decision rather than a taste one. A knife-edged prism is the
+ * thing that reads as a block; a cylinder already reads as turned, and its rim contributes far
+ * less. Blending the cylinders as well took the airliner from 1.5 to 4.7 seconds and from 21
+ * to 60 thousand triangles — three seconds and forty thousand triangles for the rims of a
+ * fuselage and two nacelles. Any component that genuinely needs a broken rim can still ask for
+ * one by naming `round` itself, which this leaves alone.
+ *
+ * `broken` in the evaluator drops any radius the solid cannot actually take, so this is a
+ * request rather than an instruction and no component can be spoiled by it.
+ */
+function withEdgeBreak(
+  shape: string, params: Record<string, string | number>,
+): Record<string, string | number> {
+  if (shape !== 'box') return params;
+  if (params.round !== undefined) return params;
+
+  const sizes = ['length', 'width', 'height', 'diameter']
+    .map((k) => params[k])
+    .filter((v): v is number => typeof v === 'number' && v > 0);
+  if (sizes.length === 0) return params;
+
+  const round = Math.min(...sizes) * 0.05;
+  return { ...params, round: Number(round.toFixed(3)) };
+}
+
 function part(
   name: string, role: string, shape: string,
-  params: Record<string, number>,
+  // Not `Record<string, number>`: a loft names the shape of each of its ends, and a sweep
+  // names its path.
+  params: Record<string, string | number>,
   at: Partial<typeof IDENTITY_PLACEMENT>,
   material: string, density: number,
   extra: { quantity?: number; operation?: 'add' | 'cut'; note?: string } = {},
 ): ComponentSpec {
   return {
     id: `p${++seq}`,
-    name, role, shape, params,
+    name, role, shape, params: withEdgeBreak(shape, params),
     placement: { ...IDENTITY_PLACEMENT, ...at },
     material, density,
     quantity: extra.quantity ?? 1,
@@ -442,9 +478,10 @@ export function bicycleRecipe(scale = 1): AssemblyPlan {
  * long, 35.8 m span, a 3.95 m fuselage. Modelled at full size in millimetres like everything
  * else, so the numbers in the tree are the numbers on the type certificate.
  *
- * Wings and stabilisers are placed as swept, tapered boxes rather than aerofoil sections. An
- * aerofoil is a lofted surface and the shape that matters for a package study is the planform
- * and the volume it encloses, not the camber. The notes say so.
+ * Wings and stabilisers are lofted from root section to tip section, so the taper and the
+ * sweep are the geometry rather than a note apologising for a box. What is still not modelled
+ * is camber: the sections are rectangles, not aerofoils, because for a package study the
+ * planform and the volume it encloses are what matter. The notes say so.
  */
 export function aeroplaneRecipe(scale = 1): AssemblyPlan {
   const L = 37570 * scale;        // overall length
@@ -460,11 +497,21 @@ export function aeroplaneRecipe(scale = 1): AssemblyPlan {
   // certificate's 35.8 m, which the inspection caught immediately.
   const sweep = (sweepDeg * Math.PI) / 180;
   const chord = 6000 * scale;
-  const halfSpan = (span - fuseD - chord * Math.sin(sweep)) / (1 + Math.cos(sweep));
+
+  // A lofted panel runs straight out along the span and carries its sweep as an offset of the
+  // tip section, so the half-span is simply the half-span. The old box was rotated about its
+  // own centre, which widens the box it occupies, and the width had to be solved backwards
+  // from the certificated span to compensate.
+  const halfSpan = (span - fuseD) / 2;
 
   const wingRoot = chord;
   const wingTip = 1600 * scale;
   const wingT = 700 * scale;
+  // Thickness tapers with chord, which is what holds the thickness-to-chord ratio constant
+  // along the span — the thing a wing is actually designed to do.
+  const wingTipT = (wingT * wingTip) / wingRoot;
+  const wingSweepBack = halfSpan * Math.tan(sweep);
+  const dihedral = halfSpan * Math.tan((5 * Math.PI) / 180);
 
   const finH = 5870 * scale;
   const tailX = -L / 2 + 3500 * scale;
@@ -490,12 +537,29 @@ export function aeroplaneRecipe(scale = 1): AssemblyPlan {
         { diameter: fuseD * 0.45, height: 4200 * scale },
         { x: -L / 2 - 1600 * scale, ry: 90, z: 620 * scale }, 'Aft fairing and APU', D.tailConeShell),
 
-      // Wings, one per side. Swept 25 degrees, which is what the rz does.
-      part('Wing', 'Lift and fuel tank', 'box',
-        { length: wingRoot, width: halfSpan, height: wingT },
-        { x: 1200 * scale, y: fuseD / 2 + halfSpan / 2, z: -fuseD / 4, rz: -sweepDeg },
+      /*
+       * Wings, one per side, lofted root to tip.
+       *
+       * On the XZ plane the loft grows along -Y, so the panel is built outboard from the
+       * fuselage side and the mirrored instance gives the other wing. Sweep is the tip
+       * section's offset along the chord, dihedral its offset in height — both of them
+       * geometry the loft carries, rather than a rotation of a constant-section box.
+       *
+       * The taper is not cosmetic: a 6 m root tapering to a 1.6 m tip holds well under half
+       * the volume of the box that used to stand in for it, and that volume is what the fuel
+       * capacity and the structural mass are read from.
+       */
+      part('Wing', 'Lift and fuel tank', 'loft',
+        {
+          plane: 'XZ', height: halfSpan, subdivisions: 4,
+          baseShape: 'rect', baseLength: wingRoot, baseWidth: wingT, baseX: 0, baseY: 0,
+          topShape: 'rect', topLength: wingTip, topWidth: wingTipT,
+          topX: -wingSweepBack, topY: dihedral,
+        },
+        { x: 1200 * scale, y: -fuseD / 2, z: -fuseD / 4 },
         'Wing box and fuel', D.wingStructure,
-        { quantity: 2, note: 'Swept 25°. Also the main fuel tank — about 19 000 litres a side.' }),
+        { quantity: 2, note: 'Swept 25°, tapered 6.0 m root to 1.6 m tip, 5° dihedral. ' +
+                             'Also the main fuel tank — about 19 000 litres a side.' }),
 
       part('Winglet', 'Reduces induced drag at the tip', 'box',
         { length: wingTip, width: 400 * scale, height: 2400 * scale },
@@ -515,15 +579,26 @@ export function aeroplaneRecipe(scale = 1): AssemblyPlan {
         'Pylon structure', D.pylonStructure,
         { quantity: 2 }),
 
-      part('Horizontal stabiliser', 'Pitch trim and control', 'box',
-        { length: 3400 * scale, width: 5900 * scale, height: 400 * scale },
-        { x: tailX, y: fuseD / 2 + 2600 * scale, z: 500 * scale, rz: -30 },
+      part('Horizontal stabiliser', 'Pitch trim and control', 'loft',
+        {
+          plane: 'XZ', height: 5900 * scale, subdivisions: 3,
+          baseShape: 'rect', baseLength: 3400 * scale, baseWidth: 400 * scale,
+          topShape: 'rect', topLength: 1300 * scale, topWidth: 160 * scale,
+          topX: -2900 * scale, topY: 0,
+        },
+        { x: tailX, y: -fuseD / 2, z: 500 * scale },
         'Stabiliser structure', D.tailStructure,
         { quantity: 2 }),
 
-      part('Vertical fin', 'Yaw stability', 'box',
-        { length: 4800 * scale, width: 350 * scale, height: finH },
-        { x: tailX - 600 * scale, z: fuseD / 2 + finH / 2 - 300 * scale },
+      // The fin lofts upward, so it is built on XY and tapers root to tip like the wing.
+      part('Vertical fin', 'Yaw stability', 'loft',
+        {
+          plane: 'XY', height: finH, subdivisions: 3,
+          baseShape: 'rect', baseLength: 4800 * scale, baseWidth: 350 * scale,
+          topShape: 'rect', topLength: 2200 * scale, topWidth: 180 * scale,
+          topX: -1900 * scale, topY: 0,
+        },
+        { x: tailX - 600 * scale, z: fuseD / 2 - 300 * scale },
         'Fin structure', D.finStructure,
         { note: 'Fin height sets the 11.76 m overall height, not the fuselage.' }),
 

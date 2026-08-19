@@ -34,6 +34,8 @@ const GLYPHS: Record<string, string> = {
   'feature.extrude': '⬢',
   'feature.extrude_cut': '⬡',
   'feature.revolve': '◍',
+  'feature.loft': '⧨',
+  'feature.sweep': '➰',
   'feature.shell': '◧',
   'feature.hole_wizard': '⬡',
   'feature.simple_hole': '○',

@@ -85,7 +85,10 @@ describe('the snapshot', () => {
     expect(snap.sizeMm[0]).toBeCloseTo(60, 3);
     expect(snap.sizeMm[1]).toBeCloseTo(40, 3);
     expect(snap.sizeMm[2]).toBeCloseTo(25, 3);
-    expect(snap.volumeMm3).toBeCloseTo(60 * 40 * 25, 1);
+    // Exactly the prism. The default box no longer carries an edge break: it turned six
+    // pickable faces into thirty-four and left Fillet and Chamfer nothing long enough to
+    // work on. Rounding is a feature you add now, so an unmodified box measures what it says.
+    expect(snap.volumeMm3).toBeCloseTo(60 * 40 * 25, 6);
     expect(snap.massG).toBeGreaterThan(0);
     expect(snap.closed).toBe(true);
   });

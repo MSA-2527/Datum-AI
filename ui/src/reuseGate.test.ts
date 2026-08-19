@@ -246,3 +246,30 @@ describe('the library, from the store', () => {
     expect(useModel.getState().plan).toBeNull();
   });
 });
+
+describe('what the status line says', () => {
+  beforeEach(reset);
+
+  it('clears a problem once the rebuild that fixes it succeeds', async () => {
+    // A fresh sketch reports "the sketch is empty", which is true for the second it exists and
+    // false as soon as anything is drawn. It stayed on screen while a solid sat in the
+    // viewport — which reads as the drawing having failed.
+    useModel.setState({ notice: { tone: 'error', text: 'The sketch is empty.' } });
+
+    await useModel.getState().build('a plate', { skipReuse: true });
+    await new Promise((r) => setTimeout(r, 400));
+
+    const notice = useModel.getState().notice;
+    expect(notice?.text ?? '').not.toMatch(/empty/);
+  });
+
+  it('keeps what it just told you about a successful build', async () => {
+    // The other half: an informational summary must survive the rebuild it describes, or it
+    // flashes and vanishes before it can be read.
+    const r = await useModel.getState().build('a plate', { skipReuse: true });
+    await new Promise((x) => setTimeout(x, 400));
+
+    expect(useModel.getState().notice?.tone).toBe('info');
+    expect(r.message).toBeTruthy();
+  });
+});

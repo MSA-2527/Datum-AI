@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addCircle, addLine, addPoint, constrain, emptySketch } from './solver';
+import { addCircle, addLine, addPoint, constrain, emptySketch, solve } from './solver';
 import { loopsOf, profileFromSketch, sketchFromJson, sketchToJson, solveForProfile } from './document';
 import { addFeature, emptyDocument, evaluateDocument } from '../../model/document';
 import { triCount } from '../topo/mesh';
@@ -226,15 +226,18 @@ describe('the sketch feature', () => {
     expect([...evaluated.errors.values()][0]).toMatch(/empty/i);
   });
 
-  it('warns while under-constrained but still builds', () => {
-    // Most sketches are under-constrained most of the time. That is worth saying and is not a
-    // reason to refuse — a dimension that does not hold is a surprise later, not now.
-    const { s } = roughRectangle();
+  it('builds an under-constrained sketch without calling it a problem', () => {
+    const { s } = constrainedRectangle();
     const { evaluated } = build(sketchToJson(s));
 
+    // Every sketch is under-constrained the moment it is drawn. Raising that as a feature
+    // warning put it in the application's main notice, where it replaced the result: draw a
+    // rectangle, get a solid, and read "Under-constrained: 8 degrees of freedom left" as the
+    // outcome. The degrees of freedom are still reported — in the sketch editor, which is
+    // where they can be acted on.
     expect(evaluated.errors.size).toBe(0);
     expect(triCount(evaluated.mesh)).toBeGreaterThan(0);
-    expect([...evaluated.warnings.values()][0]).toMatch(/degrees of freedom/i);
+    expect([...evaluated.warnings.values()]).toEqual([]);
   });
 
   it('refuses to build a conflicting sketch', () => {
@@ -243,5 +246,66 @@ describe('the sketch feature', () => {
 
     const { evaluated } = build(sketchToJson(s));
     expect([...evaluated.errors.values()][0]).toMatch(/conflict/i);
+  });
+});
+
+describe('a rectangle behaves like a rectangle', () => {
+  /*
+   * Four loose lines drawn in a rectangular arrangement are not a rectangle: drag one corner
+   * and you get a quadrilateral. What makes it one is saying that two sides are horizontal
+   * and two are vertical — which the editor now does when the shape is drawn, because nobody
+   * should have to apply four relations by hand to get the thing they just drew.
+   *
+   * These assert the property the editor relies on, at the level it actually holds: the
+   * solver's.
+   */
+  const drawn = () => {
+    const s = emptySketch();
+    const a = addPoint(s, -50, -30);
+    const b = addPoint(s, 50, -30);
+    const c = addPoint(s, 50, 30);
+    const d = addPoint(s, -50, 30);
+    return {
+      s,
+      bottom: addLine(s, a, b),
+      right: addLine(s, b, c),
+      top: addLine(s, c, d),
+      left: addLine(s, d, a),
+    };
+  };
+
+  it('has eight degrees of freedom drawn loose, and four once squared', () => {
+    const loose = drawn();
+    expect(solve(loose.s).degreesOfFreedom).toBe(8);
+
+    const square = drawn();
+    constrain(square.s, 'horizontal', [square.bottom]);
+    constrain(square.s, 'horizontal', [square.top]);
+    constrain(square.s, 'vertical', [square.right]);
+    constrain(square.s, 'vertical', [square.left]);
+
+    // Origin, width and height — the four a rectangle actually has.
+    expect(solve(square.s).degreesOfFreedom).toBe(4);
+  });
+
+  it('is fully defined once its width and height are given', () => {
+    const r = drawn();
+    constrain(r.s, 'horizontal', [r.bottom]);
+    constrain(r.s, 'horizontal', [r.top]);
+    constrain(r.s, 'vertical', [r.right]);
+    constrain(r.s, 'vertical', [r.left]);
+    constrain(r.s, 'distance', [r.bottom.start, r.bottom.end], 120);
+    constrain(r.s, 'distance', [r.right.start, r.right.end], 80);
+
+    // Two dimensions and the position: the sketch is a design rather than a drawing.
+    const result = solve(r.s);
+    expect(result.degreesOfFreedom).toBe(2);          // still free to slide in the plane
+
+    const p = (id: string) => result.sketch.entities.get(id) as { x: number; y: number };
+    const width = Math.abs(p(r.bottom.end).x - p(r.bottom.start).x);
+    const height = Math.abs(p(r.right.end).y - p(r.right.start).y);
+
+    expect(width).toBeCloseTo(120, 6);
+    expect(height).toBeCloseTo(80, 6);
   });
 });

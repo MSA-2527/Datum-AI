@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useModel, archetypeFieldsFor, selectedFeature } from '../modelStore';
 import {
-  defaultParams, featureLabel, parametersOf, paramFields,
+  defaultParams, featureLabel, parametersOf, paramFields, referenceScopeAt,
   type FeatureKind, type ParamValue,
 } from '../model/document';
 import { readNumber } from '../model/expr';
+import { appearanceFor, toHex } from '../lib/appearance';
 import { SketchEditor } from './SketchEditor';
 import { AssemblyPanel } from './AssemblyPanel';
 import { ParametersPanel } from './ParametersPanel';
@@ -31,7 +32,15 @@ const KINDS: { kind: FeatureKind; label: string; glyph: string; hint: string }[]
   { kind: 'sketch', label: 'Sketch', glyph: '✎', hint: 'Draw a profile, constrain it, extrude it' },
   { kind: 'extrude', label: 'Extrude', glyph: '⬒', hint: 'Extrude a profile' },
   { kind: 'revolve', label: 'Revolve', glyph: '◑', hint: 'Revolve a section about an axis' },
-  { kind: 'hole', label: 'Hole', glyph: '⊙', hint: 'Drill a hole, bolt circle or grid' },
+  { kind: 'loft', label: 'Loft', glyph: '⧨', hint: 'Blend one section into another — transitions, tapers, aerofoils' },
+  { kind: 'sweep', label: 'Sweep', glyph: '➰', hint: 'Drive a section along a path — springs, threads, tubes, handles' },
+  { kind: 'hole', label: 'Hole', glyph: '⊙', hint: 'Through, blind, counterbore, countersink or tapped — single, bolt circle or grid' },
+  { kind: 'rib', label: 'Rib', glyph: '⊤', hint: 'Stand a stiffening wall on the part' },
+  { kind: 'draft', label: 'Draft', glyph: '◿', hint: 'Taper the walls so the part can leave its mould' },
+  { kind: 'dome', label: 'Dome', glyph: '◠', hint: 'Bulge a flat face into a curved one' },
+  { kind: 'split', label: 'Split', glyph: '◫', hint: 'Cut the solid into two bodies with a plane' },
+  { kind: 'datum', label: 'Datum', glyph: '⌗', hint: 'A reference plane to build on, offset or tilted' },
+  { kind: 'wrap', label: 'Wrap', glyph: '◎', hint: 'Knurl, groove or flats rolled around a round part' },
   { kind: 'pocket', label: 'Pocket', glyph: '▣', hint: 'Mill a pocket' },
   { kind: 'slot', label: 'Slot', glyph: '▬', hint: 'Cut a slot' },
   { kind: 'fillet', label: 'Fillet', glyph: '◜', hint: 'Round sharp edges' },
@@ -173,6 +182,11 @@ export function FeatureEditor() {
     );
   }
 
+  // Everything this feature may name, offered to the browser's own completion. A reference
+  // language whose vocabulary is invisible is one nobody uses: until this existed, driving one
+  // feature from another required knowing that `Base.length` was even a thing you could type.
+  const references = referenceScopeAt(doc, feature.id);
+
   const error = evaluated.errors.get(feature.id);
   const warning = evaluated.warnings.get(feature.id);
   const values = parametersOf(doc);
@@ -185,7 +199,7 @@ export function FeatureEditor() {
         min: d.min, max: d.max, step: d.unit === 'count' ? 1 : (d.max - d.min) / 200,
         kind: 'number' as const, note: d.note,
       }))
-    : paramFields(feature.kind, feature.params).map((f) => ({ ...f, note: undefined as string | undefined }));
+    : paramFields(feature.kind, feature.params, doc).map((f) => ({ ...f, note: undefined as string | undefined }));
 
   return (
     <div className="mt-editor">
@@ -198,10 +212,17 @@ export function FeatureEditor() {
         <span className="mt-kind">{featureLabel(feature.kind)}</span>
       </div>
 
+      <datalist id="mt-refs">
+        {references.map((r) => (
+          <option key={r.name} value={r.name} label={`${Number(r.value.toFixed(4))} — ${r.from}`} />
+        ))}
+      </datalist>
+
       {error && <div className="note" style={{ borderColor: 'var(--dang)' }}><b>Cannot build</b>{error}</div>}
       {!error && warning && <div className="note"><b>Note</b>{warning}</div>}
 
       <Placement />
+      <Appearance />
 
       {feature.kind === 'sketch' && (
         <SketchEditor
@@ -263,7 +284,7 @@ export function FeatureEditor() {
                 className={isExpression ? 'mt-fx is-on' : 'mt-fx'}
                 title={isExpression
                   ? 'Back to a fixed number'
-                  : 'Drive this from a parameter, e.g. plateLength / 2'}
+                  : 'Drive this from a parameter or another feature, e.g. Base.length / 2'}
                 aria-pressed={isExpression}
                 onClick={() => setParams(feature.id, {
                   [field.key]: isExpression ? Number(value.toFixed(4)) : String(value),
@@ -282,6 +303,7 @@ export function FeatureEditor() {
                 spellCheck={false}
                 onChange={(e) => setParams(feature.id, { [field.key]: e.target.value })}
                 aria-label={`${field.label} expression`}
+                list="mt-refs"
               />
             ) : (
               <div className="mt-field-row">
@@ -380,6 +402,61 @@ function FaceScope() {
  * Shown for every feature rather than only for assembly components, because a box added from
  * the toolbar needs moving as much as a generated one does.
  */
+/**
+ * Material and colour for the selected feature.
+ *
+ * Appearance is a document property, not a viewer setting: an assembly whose components are
+ * told apart only by a colour someone chose in a session loses that the moment it is saved.
+ * So both land in the feature's parameters and travel with the file.
+ *
+ * Colour only, not material. Material sets density and therefore mass, and a single-part
+ * document carries one density — letting a feature claim brass here would recolour it and
+ * silently make the weight on the status line wrong. Component materials come from the bill
+ * of materials, which weighs each one at its own density, and colour follows them.
+ */
+function Appearance() {
+  const feature = useModel(selectedFeature);
+  const doc = useModel((s) => s.doc);
+  const setParams = useModel((s) => s.setParams);
+
+  if (!feature) return null;
+
+  const material = typeof feature.params.material === 'string' ? feature.params.material : '';
+  const chosen = typeof feature.params.colour === 'string' ? feature.params.colour : '';
+  const look = appearanceFor(material || doc.material);
+  const swatch = chosen || toHex(look.rgb);
+
+  return (
+    <div className="mt-place">
+      <div className="mt-place-head">
+        <span>Appearance</span>
+        {chosen && (
+          <button
+            type="button"
+            title={`Back to ${look.label.toLowerCase()}`}
+            onClick={() => setParams(feature.id, { colour: '' })}
+          >
+            Reset
+          </button>
+        )}
+      </div>
+
+      <div className="mt-field">
+        <label htmlFor="ap-colour">Colour</label>
+        <input
+          id="ap-colour"
+          type="color"
+          value={swatch}
+          onChange={(e) => setParams(feature.id, { colour: e.target.value })}
+        />
+        <span className="mt-swatch-note">
+          {chosen ? 'chosen' : `from ${(material || doc.material).toLowerCase()}`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function Placement() {
   const feature = useModel(selectedFeature);
   const place = useModel((s) => s.place);

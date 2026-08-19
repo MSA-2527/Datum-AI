@@ -89,7 +89,7 @@ export interface BuildSuggestion {
 // ── thresholding ─────────────────────────────────────────────────────────────
 
 /** Luminance, using the Rec. 601 weights that match perceived brightness. */
-function luminance(img: RasterImage): Uint8Array {
+export function luminance(img: RasterImage): Uint8Array {
   const out = new Uint8Array(img.width * img.height);
   for (let i = 0, p = 0; i < out.length; i++, p += 4) {
     const alpha = img.data[p + 3];
@@ -137,6 +137,53 @@ export function otsuThreshold(gray: Uint8Array): number {
     if (between > bestVar) { bestVar = between; best = t; }
   }
   return best;
+}
+
+/**
+ * Foreground by how far a pixel is from the background, not by how dark it is.
+ *
+ * A single brightness threshold assumes the object is uniformly darker (or lighter) than what
+ * it sits on. A *shaded* object is not: a domed cover photographed on a white bench runs from
+ * black at the rim to near-white at the crown, and Otsu puts the crown on the background side —
+ * so the part traces as a ring with a hole where its brightest region was. Everything built
+ * from that outline is then wrong in a way that looks deliberate.
+ *
+ * The background is the one thing about a product photograph that can be assumed: it is what
+ * touches the edge of the frame. So it is measured there — median for the level, median
+ * absolute deviation for how much it varies — and a pixel is foreground when it is far enough
+ * from that level to not be more background. Robust statistics rather than mean and standard
+ * deviation because a part that runs off the edge of the frame contaminates the border samples,
+ * and a median shrugs that off where a mean does not.
+ *
+ * This handles a light object on a light background, a dark one on dark, and a shaded one on
+ * either, none of which a single threshold can do.
+ */
+export function backgroundMask(gray: Uint8Array, width: number, height: number): Uint8Array {
+  const border: number[] = [];
+  const band = Math.max(1, Math.round(Math.min(width, height) * 0.02));
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (x >= band && x < width - band && y >= band && y < height - band) continue;
+      border.push(gray[y * width + x]!);
+    }
+  }
+  if (border.length < 8) return new Uint8Array(gray.length);
+
+  border.sort((a, b) => a - b);
+  const level = border[border.length >> 1]!;
+
+  const deviations = border.map((v) => Math.abs(v - level)).sort((a, b) => a - b);
+  const mad = deviations[deviations.length >> 1]!;
+
+  // 1.4826 puts the median absolute deviation on the same footing as a standard deviation for
+  // normal data; three of those is the usual "this is not background" line. The floor stops a
+  // perfectly uniform background — a rendered image, a scan — from admitting everything.
+  const spread = Math.max(8, mad * 1.4826 * 3);
+
+  const mask = new Uint8Array(gray.length);
+  for (let i = 0; i < gray.length; i++) mask[i] = Math.abs(gray[i]! - level) > spread ? 1 : 0;
+  return mask;
 }
 
 // ── contour tracing ──────────────────────────────────────────────────────────
@@ -434,6 +481,26 @@ export function fitSegments(loop: Vec2[], tol: number): FittedSegment[] {
  * photographed rather than a flat plate of its outline. The confidence is reported so the UI
  * can offer the alternative rather than committing silently.
  */
+/**
+ * Symmetric about both centrelines, within a tolerance.
+ *
+ * The test that separates a plan view from a profile view. A bottle photographed side-on is
+ * symmetric about its vertical centreline and nothing else, and revolving it is right. A domed
+ * cover photographed from above is a circle — symmetric both ways — and revolving *that*
+ * invents the half of it nobody photographed instead of reading the half that is visible.
+ */
+export function symmetricBothWays(loop: Vec2[]): boolean {
+  if (loop.length < 8) return false;
+
+  const upright = detectSymmetry(loop);
+  if (upright.operation !== 'revolve') return false;
+
+  // The same test with the axes exchanged, which is a reflection about the diagonal — a shape
+  // symmetric about its horizontal centreline is symmetric about the swapped one's vertical.
+  const swapped = loop.map(([x, y]) => [y, x] as Vec2);
+  return detectSymmetry(swapped).operation === 'revolve';
+}
+
 export function detectSymmetry(loop: Vec2[]): BuildSuggestion {
   if (loop.length < 8) {
     return { operation: 'extrude', confidence: 0.5, reason: 'Too few points to judge symmetry.' };
@@ -490,6 +557,63 @@ export function detectSymmetry(loop: Vec2[]): BuildSuggestion {
   };
 }
 
+/**
+ * The half of an outline on one side of its axis, closed along the axis itself.
+ *
+ * A symmetric silhouette — a bottle, a bearing, a turned spindle — describes a solid of
+ * revolution, and revolving *half* of it reproduces the object. Revolving the whole outline
+ * would sweep the far side back through the near side; extruding it gives a flat plate of a
+ * bottle, which is what the importer used to produce and what made photographs of round
+ * things useless.
+ *
+ * Sutherland–Hodgman against the half-plane `x >= axisX`, which for a simple polygon leaves a
+ * simple polygon. The result is translated so the axis sits at x = 0, because that is where
+ * the revolve operation expects it.
+ */
+export function halfProfile(loop: Vec2[], axisX: number): Vec2[] {
+  if (loop.length < 3) return [];
+
+  const inside = (p: Vec2) => p[0] >= axisX;
+  const cross = (a: Vec2, b: Vec2): Vec2 => {
+    const span = b[0] - a[0];
+    // Both ends on the axis: there is no crossing to compute, and dividing would give NaN.
+    if (Math.abs(span) < 1e-12) return [axisX, a[1]];
+    const t = (axisX - a[0]) / span;
+    return [axisX, a[1] + t * (b[1] - a[1])];
+  };
+
+  const clipped: Vec2[] = [];
+  for (let i = 0; i < loop.length; i++) {
+    const a = loop[i]!;
+    const b = loop[(i + 1) % loop.length]!;
+    const ain = inside(a);
+    const bin = inside(b);
+
+    if (ain) clipped.push(a);
+    if (ain !== bin) clipped.push(cross(a, b));
+  }
+
+  // Duplicates appear wherever the outline touches the axis exactly — the vertex is kept as
+  // inside *and* emitted again as the crossing — and a profile with a zero-length edge is not
+  // one the kernel will accept. Deduplicated cyclically, because the first and last points of
+  // a closed loop are neighbours too.
+  const cleaned: Vec2[] = [];
+  for (const p of clipped) {
+    const q: Vec2 = [p[0] - axisX, p[1]];
+    const last = cleaned[cleaned.length - 1];
+    if (last && Math.abs(last[0] - q[0]) < 1e-9 && Math.abs(last[1] - q[1]) < 1e-9) continue;
+    cleaned.push(q);
+  }
+  while (cleaned.length > 1) {
+    const first = cleaned[0]!;
+    const last = cleaned[cleaned.length - 1]!;
+    if (Math.abs(first[0] - last[0]) < 1e-9 && Math.abs(first[1] - last[1]) < 1e-9) cleaned.pop();
+    else break;
+  }
+
+  return cleaned.length >= 3 ? cleaned : [];
+}
+
 // ── the pipeline ─────────────────────────────────────────────────────────────
 
 export function traceImage(img: RasterImage, opts: TraceOptions): TracedShape | { error: string } {
@@ -512,9 +636,30 @@ export function traceImage(img: RasterImage, opts: TraceOptions): TracedShape | 
   const threshold = opts.threshold ?? otsuThreshold(gray);
 
   const mask = new Uint8Array(gray.length);
-  for (let i = 0; i < gray.length; i++) {
-    const dark = gray[i] <= threshold;
-    mask[i] = (opts.invert ? !dark : dark) ? 1 : 0;
+
+  if (thresholdAuto && !opts.invert) {
+    // Separated from the background rather than by a brightness cut, which is the only way a
+    // shaded object survives: see `backgroundMask`.
+    const byBackground = backgroundMask(gray, img.width, img.height);
+
+    let covered = 0;
+    for (const v of byBackground) covered += v;
+    const share = covered / byBackground.length;
+
+    // Trusted when it found a plausible object. A background model that selects almost nothing
+    // or almost everything has been defeated — a picture with no clear background, or one
+    // cropped tight to the part — and the brightness cut is the better fallback.
+    if (share > 0.005 && share < 0.9) mask.set(byBackground);
+  }
+
+  let anyFromBackground = false;
+  for (const v of mask) if (v) { anyFromBackground = true; break; }
+
+  if (!anyFromBackground) {
+    for (let i = 0; i < gray.length; i++) {
+      const dark = gray[i] <= threshold;
+      mask[i] = (opts.invert ? !dark : dark) ? 1 : 0;
+    }
   }
 
   let filled = 0;

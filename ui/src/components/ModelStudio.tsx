@@ -75,6 +75,7 @@ export function ModelStudio() {
   const [showLibrary, setShowLibrary] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLInputElement>(null);
 
   const note = useCallback((tone: 'info' | 'warn' | 'error', text: string) => {
     useModel.setState({ notice: { tone, text } });
@@ -128,9 +129,12 @@ export function ModelStudio() {
           assumedWidthMm / data.width,
           6,
         );
+        // Naming the feature the user has to click matters, because it is not always the
+        // same one: a symmetric silhouette comes back as a revolve, not an extrusion.
+        const built = useModel.getState().doc.features[0]?.name ?? 'the traced feature';
         note(r.ok ? 'info' : 'error',
           `${r.message} The picture was taken as ${assumedWidthMm} mm across — if that is ` +
-          'wrong, click Traced outline in the tree and set Overall width.');
+          `wrong, click ${built} in the tree and set the size.`);
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -187,6 +191,12 @@ export function ModelStudio() {
           <button onClick={() => fileRef.current?.click()} title="Open a saved part or a STEP solid, trace an image, or rebuild a DXF drawing">
             Open / Import…
           </button>
+          <button
+            onClick={() => imageRef.current?.click()}
+            title="Photograph or screenshot of a part — traced to a profile, then revolved if it is a turned part or extruded if it is flat"
+          >
+            Image → 3D…
+          </button>
           <button onClick={() => doExport('svg')} disabled={!hasModel} title="Dimensioned drawing as SVG">Drawing SVG</button>
           <button onClick={() => doExport('dxf')} disabled={!hasModel} title="Dimensioned drawing as DXF">Drawing DXF</button>
           <button
@@ -241,6 +251,23 @@ export function ModelStudio() {
           >
             AI: {ai.id === 'none' ? 'off' : providerInfo(ai.id).label.split(' ')[0]}
           </button>
+
+          {/*
+            A second input, images only, so the picker opens on photographs rather than on a
+            folder of STEP files. "Open / Import…" already accepted images; nobody found it,
+            because nothing in the word "import" suggests you can photograph a part.
+          */}
+          <input
+            ref={imageRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void onFile(f);
+              e.target.value = '';
+            }}
+          />
 
           <input
             ref={fileRef}

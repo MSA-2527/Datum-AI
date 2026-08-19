@@ -45,11 +45,22 @@ interface Props {
 /** World millimetres across the canvas. */
 const VIEW = 260;
 
+/**
+ * How far off an axis a line may be drawn and still be taken as on it.
+ *
+ * Five degrees. Wide enough that nobody has to draw accurately with a mouse, narrow enough
+ * that a deliberate shallow angle survives — and a deliberate 4° taper is rare next to an
+ * accidental 4° that was meant to be flat.
+ */
+const SNAP_DEGREES = 5;
+
 export function SketchEditor({ value, onChange }: Props) {
   const [tool, setTool] = useState<Tool>('rect');
   const [picked, setPicked] = useState<EntityId[]>([]);
   const [pending, setPending] = useState<[number, number] | null>(null);
   const [dimension, setDimension] = useState('100');
+  /** The line or circle whose size is being typed, and the box it is typed into. */
+  const [sizing, setSizing] = useState<{ id: EntityId; kind: 'line' | 'circle'; value: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -103,7 +114,20 @@ export function SketchEditor({ value, onChange }: Props) {
       const b = addPoint(next, x1, y0);
       const c = addPoint(next, x1, y1);
       const d = addPoint(next, x0, y1);
-      addLine(next, a, b); addLine(next, b, c); addLine(next, c, d); addLine(next, d, a);
+      const bottom = addLine(next, a, b);
+      const right = addLine(next, b, c);
+      const top = addLine(next, c, d);
+      const left = addLine(next, d, a);
+
+      // A rectangle *is* two horizontals and two verticals, and saying so is what leaves it
+      // with the four degrees of freedom it actually has — origin, width and height — instead
+      // of eight loose coordinates. Drawn without them, dragging one corner turns the
+      // rectangle into a quadrilateral, which is not what anybody drew.
+      constrain(next, 'horizontal', [bottom]);
+      constrain(next, 'horizontal', [top]);
+      constrain(next, 'vertical', [right]);
+      constrain(next, 'vertical', [left]);
+
       commit(next);
       setPending(null);
       return;
@@ -113,7 +137,18 @@ export function SketchEditor({ value, onChange }: Props) {
     if (!pending) { setPending(at); return; }
     const a = addPoint(next, pending[0], pending[1]);
     const b = addPoint(next, at[0], at[1]);
-    addLine(next, a, b);
+    const line = addLine(next, a, b);
+
+    // Automatic relations, the way every CAD package infers them: a line drawn within a few
+    // degrees of an axis was meant to be on it. Inferring is not guessing — the alternative
+    // is a sketch that looks square and is 0.4° out, which survives every visual check and
+    // fails at the machine.
+    const dx = Math.abs(at[0] - pending[0]);
+    const dy = Math.abs(at[1] - pending[1]);
+    const slope = Math.atan2(dy, dx) * (180 / Math.PI);
+    if (slope < SNAP_DEGREES) constrain(next, 'horizontal', [line]);
+    else if (slope > 90 - SNAP_DEGREES) constrain(next, 'vertical', [line]);
+
     commit(next);
     setPending(at);
   }, [tool, pending, toWorld, value, commit]);
@@ -180,6 +215,43 @@ export function SketchEditor({ value, onChange }: Props) {
 
     commit(next);
   }, [picked, value, commit]);
+
+  /**
+   * Drives a length or a diameter to a typed value.
+   *
+   * This is the act that separates a drawing from a design. Until a dimension is *driving*,
+   * the geometry is wherever the mouse left it and the number beside it is a readout; once it
+   * is, the number is the input and the geometry follows — which is what makes a change to it
+   * a change to the part rather than a redraw of it.
+   *
+   * Applied to the line's own endpoints, so it survives whatever else moves.
+   */
+  const applySize = useCallback(() => {
+    if (!sizing) return;
+    const wanted = Number(sizing.value);
+    if (!Number.isFinite(wanted) || wanted <= 0) { setSizing(null); return; }
+
+    const next = sketchFromJson(value);
+    const entity = next.entities.get(sizing.id);
+    if (!entity) { setSizing(null); return; }
+
+    // A second dimension on the same thing is a contradiction, not an update. The old one is
+    // replaced so typing a new number means what a user expects it to mean.
+    const targets = entity.kind === 'line' ? [entity.start, entity.end] : [sizing.id];
+    next.constraints = next.constraints.filter((c) => {
+      if (entity.kind === 'line') {
+        return !(c.kind === 'distance' && c.entities.length === 2
+          && c.entities.includes(entity.start) && c.entities.includes(entity.end));
+      }
+      return !(c.kind === 'radius' && c.entities[0] === sizing.id);
+    });
+
+    if (entity.kind === 'line') constrain(next, 'distance', targets, wanted);
+    else constrain(next, 'radius', targets, wanted / 2);      // typed as a diameter
+
+    commit(next);
+    setSizing(null);
+  }, [sizing, value, commit]);
 
   // ── drawing ──
   const px = (worldX: number) => ((worldX + VIEW / 2) / VIEW) * 100;
@@ -259,6 +331,62 @@ export function SketchEditor({ value, onChange }: Props) {
           );
         })}
 
+        {/*
+          Every size on the drawing, and clickable.
+
+          A sketch without its dimensions on it is a picture. Showing them turns the canvas
+          into the document an engineer reads — and making them the control as well as the
+          readout removes the step where you select a line, find a constraint button, and type
+          into a box somewhere else.
+
+          A driven dimension is drawn differently from a measured one, because "this is 100
+          because I said so" and "this happens to be 100" are different facts about a design.
+        */}
+        {lines.map((l) => {
+          if (l.kind !== 'line') return null;
+          const [ax, ay] = xy(l.start), [bx, by] = xy(l.end);
+          const length = Math.hypot(bx - ax, by - ay);
+          if (length < VIEW * 0.06) return null;          // no room to read it
+
+          const driven = view.constraints.some((c) => c.kind === 'distance'
+            && c.entities.includes(l.start) && c.entities.includes(l.end));
+
+          return (
+            <text
+              key={`d-${l.id}`}
+              className={driven ? 'sk-dimtext is-driven' : 'sk-dimtext'}
+              x={px((ax + bx) / 2)} y={py((ay + by) / 2) - 1.4}
+              textAnchor="middle"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSizing({ id: l.id, kind: 'line', value: length.toFixed(1) });
+              }}
+            >
+              {length.toFixed(1)}
+            </text>
+          );
+        })}
+
+        {circles.map((c) => {
+          if (c.kind !== 'circle') return null;
+          const [cx, cy] = xy(c.centre);
+          const driven = view.constraints.some((k) => k.kind === 'radius' && k.entities[0] === c.id);
+          return (
+            <text
+              key={`d-${c.id}`}
+              className={driven ? 'sk-dimtext is-driven' : 'sk-dimtext'}
+              x={px(cx)} y={py(cy) + 1}
+              textAnchor="middle"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSizing({ id: c.id, kind: 'circle', value: (c.radius * 2).toFixed(1) });
+              }}
+            >
+              {`⌀${(c.radius * 2).toFixed(1)}`}
+            </text>
+          );
+        })}
+
         {points.map((p) => {
           if (p.kind !== 'point') return null;
           return (
@@ -277,6 +405,30 @@ export function SketchEditor({ value, onChange }: Props) {
           <circle cx={px(pending[0])} cy={py(pending[1])} r="1.2" className="sk-pending" />
         )}
       </svg>
+
+      {sizing && (
+        <div className="sk-size">
+          <label htmlFor="sk-size-value">
+            {sizing.kind === 'circle' ? 'Diameter' : 'Length'}
+          </label>
+          <input
+            id="sk-size-value"
+            type="number"
+            autoFocus
+            value={sizing.value}
+            min={0}
+            step={0.5}
+            onChange={(e) => setSizing({ ...sizing, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') applySize();
+              if (e.key === 'Escape') setSizing(null);
+            }}
+          />
+          <span>mm</span>
+          <button className="primary" onClick={applySize}>Set</button>
+          <button onClick={() => setSizing(null)}>Cancel</button>
+        </div>
+      )}
 
       <div className="sk-status" data-tone={tone}>
         {solved.summary}

@@ -175,7 +175,21 @@ describe('importing a picture', () => {
     return { width: w, height: h, data };
   }
 
-  it('traces an outline and extrudes it into a closed solid', () => {
+  /** An L, which is symmetric about nothing and so stays a flat profile. */
+  function ell(w = 120, h = 120): RasterImage {
+    const data = new Uint8ClampedArray(w * h * 4).fill(255);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const inside = (x > 10 && x < 40 && y > 10 && y < 100)
+          || (x > 10 && x < 100 && y > 70 && y < 100);
+        const i = (y * w + x) * 4;
+        if (inside) { data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; }
+      }
+    }
+    return { width: w, height: h, data };
+  }
+
+  it('traces an outline into a closed solid', () => {
     const r = useModel.getState().importImage(blob(), 0.5, 6);
 
     expect(r.ok, r.message).toBe(true);
@@ -184,8 +198,16 @@ describe('importing a picture', () => {
     expect(evaluated.health.closed).toBe(true);
   });
 
-  it('produces a feature whose thickness can then be edited', () => {
+  it('revolves a symmetric silhouette rather than flattening it', () => {
+    // An ellipse is the outline of an ellipsoid, not of an elliptical plate. Extruding it —
+    // which is what this used to do to every picture — produces a flat thing shaped like the
+    // object rather than the object.
     useModel.getState().importImage(blob(), 0.5, 6);
+    expect(useModel.getState().doc.features[0]!.kind).toBe('revolve');
+  });
+
+  it('produces a feature whose thickness can then be edited', () => {
+    useModel.getState().importImage(ell(), 0.5, 6);
     const feature = useModel.getState().doc.features[0];
     expect(feature).toBeDefined();
 

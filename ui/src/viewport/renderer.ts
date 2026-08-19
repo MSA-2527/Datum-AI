@@ -33,11 +33,16 @@ uniform mat4 uProjection;
 
 out vec3 vNormal;
 out vec3 vViewPos;
+out vec3 vWorldPos;
 flat out float vFaceId;
 
 void main() {
   vec4 viewPos = uView * vec4(aPosition, 1.0);
   vViewPos = viewPos.xyz;
+  // Kept in world space, because a section plane is a fact about the part and not about where
+  // the camera happens to be. Clipping in view space would slice a different half of the model
+  // every time it was orbited.
+  vWorldPos = aPosition;
   // Normals are transformed by the view rotation only; the model matrix is identity here
   // because geometry is already in world coordinates.
   vNormal = mat3(uView) * aNormal;
@@ -49,6 +54,7 @@ const SOLID_FS = `#version 300 es
 precision highp float;
 
 in vec3 vNormal;
+in vec3 vWorldPos;
 in vec3 vViewPos;
 flat in float vFaceId;
 
@@ -60,6 +66,12 @@ uniform float uHoverFace;
 uniform float uSelectedFeatureLo;
 uniform float uSelectedFeatureHi;
 
+// Section plane, as a normal and an offset along it. Everything on the positive side is
+// discarded, so the cut face is whatever was behind it.
+uniform vec3 uSectionNormal;
+uniform float uSectionOffset;
+uniform bool uSectionOn;
+
 // Picked faces, as a bitmap in a texture.
 //
 // A uniform array would cap the selection at whatever length was declared, and a loop over
@@ -69,9 +81,21 @@ uniform sampler2D uPicked;
 uniform float uPickedWidth;
 uniform bool uHasPicked;
 
+// Each face's own colour, looked up rather than passed per vertex.
+//
+// A vertex attribute would mean re-uploading the whole position buffer to recolour one
+// component; a uniform array would cap the model at whatever length was declared. A texture
+// indexed by face id is one upload of a few kilobytes, has no limit, and is the same trick
+// the picked-face bitmap above already uses.
+uniform sampler2D uFaceColour;
+uniform float uFaceColourWidth;
+uniform bool uHasFaceColour;
+
 out vec4 outColour;
 
 void main() {
+  if (uSectionOn && dot(vWorldPos, uSectionNormal) > uSectionOffset) discard;
+
   // Two-sided lighting: a face seen from behind — through a bore, or in a section — must
   // still be lit, or the inside of every hole is a black void.
   vec3 n = normalize(vNormal);
@@ -91,6 +115,15 @@ void main() {
   float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.18;
 
   vec3 colour = uBaseColour;
+  if (uHasFaceColour) {
+    float idx = floor(vFaceId + 0.5);
+    float w = max(uFaceColourWidth, 1.0);
+    if (idx >= 0.0 && idx < w * w) {
+      vec2 uv = (vec2(mod(idx, w), floor(idx / w)) + 0.5) / vec2(w, w);
+      colour = texture(uFaceColour, uv).rgb;
+    }
+  }
+
   bool inSelectedFeature =
     uSelectedFeatureLo >= 0.0 &&
     vFaceId >= uSelectedFeatureLo - 0.5 &&
@@ -187,6 +220,13 @@ export interface RenderOptions {
   selectedFeatureRange: [number, number];
   showEdges: boolean;
   dark: boolean;
+  /**
+   * Cut the model open along a plane, hiding everything in front of it.
+   *
+   * In world space rather than view space: a section is a fact about the part, and clipping
+   * against the camera would slice a different half every time the model was orbited.
+   */
+  section?: { normal: [number, number, number]; offset: number } | null;
 }
 
 export interface GeometryBuffers {
@@ -215,6 +255,7 @@ export class SolidRenderer {
   private pickDepth: WebGLRenderbuffer | null = null;
   private pickSize: [number, number] = [0, 0];
   private pickedTexture: WebGLTexture | null = null;
+  private faceColourTexture: WebGLTexture | null = null;
 
   private counts: GeometryBuffers = { triangleCount: 0, edgeCount: 0 };
   private modelScale = 1;
@@ -415,6 +456,11 @@ export class SolidRenderer {
     this.setVec3(this.solidProgram, 'uPickedColour', [1.0, 0.68, 0.24]);
     this.setFloat(this.solidProgram, 'uHoverFace', opts.hoverFace);
     this.uploadPicked(opts.pickedFaces);
+    const section = opts.section ?? null;
+    this.setBool(this.solidProgram, 'uSectionOn', section !== null);
+    this.setVec3(this.solidProgram, 'uSectionNormal', section ? section.normal : [0, 0, 1]);
+    this.setFloat(this.solidProgram, 'uSectionOffset', section ? section.offset : 0);
+
     this.setFloat(this.solidProgram, 'uSelectedFeatureLo', opts.selectedFeatureRange[0]);
     this.setFloat(this.solidProgram, 'uSelectedFeatureHi', opts.selectedFeatureRange[1]);
 
@@ -541,6 +587,53 @@ export class SolidRenderer {
     this.setFloat(this.solidProgram, 'uPickedWidth', width);
   }
 
+  /**
+   * Each face's colour, as a texture indexed by face id.
+   *
+   * Uploaded only when the colouring changes rather than every frame: the array is rebuilt
+   * when the model rebuilds, which is exactly when a face can have acquired a new colour.
+   *
+   * Texture unit 1, because unit 0 belongs to the picked-face bitmap and both are sampled in
+   * the same pass.
+   */
+  setFaceColours(colours: Float32Array | null): void {
+    const gl = this.gl;
+    if (!this.solidProgram) return;
+    gl.useProgram(this.solidProgram);
+
+    const has = !!colours && colours.length >= 3;
+    this.setBool(this.solidProgram, 'uHasFaceColour', has);
+    if (!has) { this.setFloat(this.solidProgram, 'uFaceColourWidth', 1); return; }
+
+    const faces = Math.floor(colours!.length / 3);
+    const width = Math.max(1, Math.ceil(Math.sqrt(faces)));
+
+    // RGB per face, padded out to the square the shader indexes into.
+    const data = new Uint8Array(width * width * 3);
+    for (let i = 0; i < faces; i++) {
+      for (let k = 0; k < 3; k++) {
+        data[i * 3 + k] = Math.round(Math.max(0, Math.min(1, colours![i * 3 + k]!)) * 255);
+      }
+    }
+
+    if (!this.faceColourTexture) this.faceColourTexture = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.faceColourTexture);
+    // Three bytes per texel: alignment must be relaxed, or a width that is not a multiple of
+    // four is read with padding that is not there and every colour shifts along the row.
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, width, width, 0, gl.RGB, gl.UNSIGNED_BYTE, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    const loc = gl.getUniformLocation(this.solidProgram, 'uFaceColour');
+    if (loc) gl.uniform1i(loc, 1);
+    this.setFloat(this.solidProgram, 'uFaceColourWidth', width);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
   private setBool(program: WebGLProgram, name: string, v: boolean): void {
     const loc = this.gl.getUniformLocation(program, name);
     if (loc) this.gl.uniform1i(loc, v ? 1 : 0);
@@ -574,6 +667,7 @@ export class SolidRenderer {
     }
     if (this.pickTexture) gl.deleteTexture(this.pickTexture);
     if (this.pickedTexture) gl.deleteTexture(this.pickedTexture);
+    if (this.faceColourTexture) gl.deleteTexture(this.faceColourTexture);
     if (this.pickDepth) gl.deleteRenderbuffer(this.pickDepth);
     if (this.pickFbo) gl.deleteFramebuffer(this.pickFbo);
   }

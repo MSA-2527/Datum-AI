@@ -24,6 +24,40 @@ interface Message {
 
 let messageId = 0;
 
+
+/**
+ * The steps the last build took.
+ *
+ * Folded away by default, because most of the time the part is right and the chain is noise.
+ * Open when something was *not* met, because that is exactly when the user needs to see which
+ * step reached the wrong conclusion — and it is the difference between "the assistant gave me
+ * the wrong thing" and "it read 400 mm as a length and could not scale to it".
+ */
+function ReasoningPanel() {
+  const reasoning = useModel((s) => s.reasoning);
+  if (!reasoning || reasoning.steps.length === 0) return null;
+
+  const missed = reasoning.checks.filter((c) => !c.met).length;
+
+  return (
+    <details className="as-reasoning" open={missed > 0}>
+      <summary>
+        How this was worked out
+        {missed > 0 && <b> — {missed} not met</b>}
+      </summary>
+
+      <ol>
+        {reasoning.steps.map((step, i) => (
+          <li key={`${step.name}-${i}`} data-acted={step.acted ? 'true' : undefined}>
+            <strong>{step.name}</strong>
+            <span>{step.finding}</span>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
 export function Assistant({ starters }: { starters?: string[] }) {
   const build = useModel((s) => s.build);
   const notice = useModel((s) => s.notice);
@@ -241,6 +275,7 @@ export function Assistant({ starters }: { starters?: string[] }) {
       )}
 
       {notice && <div className="ms-notice" data-tone={notice.tone}>{notice.text}</div>}
+      <ReasoningPanel />
 
       <div className="ms-composer">
         <textarea

@@ -28,7 +28,13 @@ import {
   describeRack, designRack, measurePart, type RackDesign, type RackOptions,
 } from './domain/anodizing';
 import { billOfMaterials, type AssemblyPlan, type BomLine } from './assembly/plan';
-import { traceImage, type RasterImage } from './ingest/image/trace';
+import { halfProfile, symmetricBothWays, traceImage, type RasterImage } from './ingest/image/trace';
+import { reliefFromImage } from './ingest/image/relief';
+import { buildFaceGraph } from './kernel/topo/facegraph';
+import { faceBoundary } from './kernel/topo/boundary';
+import { planeFrom } from './kernel/ops/build';
+import { type Vec3 } from './kernel/math/vec';
+import { type Reasoning } from './ai/reason';
 import { readDxf } from './ingest/drawing/dxf';
 import { readStep } from './ingest/step/read';
 import { importDrawing } from './ingest/drawing/reconstruct';
@@ -84,6 +90,8 @@ interface ModelState {
   ai: ProviderConfig;
   /** The assembly plan behind the current document, when it came from one. */
   plan: AssemblyPlan | null;
+  /** The steps the last build took, and whether it met what was asked. */
+  reasoning: Reasoning | null;
 
   /**
    * Questions waiting to be answered before a part is built.
@@ -110,6 +118,8 @@ interface ModelState {
 
   // ── mutations ──
   commit: (doc: Document, label: string) => void;
+  /** As `commit`, and opens what the import made rather than leaving nothing selected. */
+  commitImported: (doc: Document, label: string) => void;
   /** Schedules a background rebuild. The result arrives asynchronously. */
   rebuild: (doc: Document) => void;
   undo: () => void;
@@ -124,6 +134,16 @@ interface ModelState {
   applyFacesToFeature: () => void;
 
   addFeature: (kind: FeatureKind) => void;
+  /** Pushes or pulls a flat face along its normal, as a new extrude feature. */
+  pushPull: (faceId: number, distance: number) => { ok: boolean; message: string };
+  /** Adds a fillet or chamfer already scoped to the given faces. */
+  addScoped: (kind: FeatureKind, faces: number[]) => void;
+  /** Drills a hole at the centre of a picked face. */
+  drillOnFace: (faceId: number) => { ok: boolean; message: string };
+  /** Stands a rib on a picked face. */
+  ribOnFace: (faceId: number) => { ok: boolean; message: string };
+  /** Starts a sketch or extrude on a picked planar face rather than on a named plane. */
+  sketchOnFace: (faceId: number, kind: FeatureKind) => { ok: boolean; message: string };
   setParams: (id: string, params: Record<string, ParamValue>) => void;
   rename: (id: string, name: string) => void;
   /** Moves or turns a part. Absolute, in millimetres and degrees. */
@@ -358,6 +378,22 @@ export const useModel = create<ModelState>((set, get) => ({
   notice: null,
   ai: loadConfig(),
   plan: null,
+  reasoning: null,
+
+  /*
+   * Commit a document that has just been imported, and open what it made.
+   *
+   * A feature added from the toolbar opens in the editor; an imported one did not, so the
+   * import told you to go and click it — "click Traced outline in the tree and set the size" —
+   * which is work the application could do itself and knew it was asking for. Anything with
+   * one obvious subject opens it; a multi-body import opens the first body, which is the one
+   * the camera framed.
+   */
+  commitImported(doc, label) {
+    get().commit(doc, label);
+    const first = doc.features[0];
+    if (first) set({ selectedFeatureId: first.id, editingFeatureId: first.id });
+  },
 
   commit(doc, label) {
     const previous = get().doc;
@@ -379,12 +415,22 @@ export const useModel = create<ModelState>((set, get) => ({
     if (!evaluator) {
       evaluator = new Evaluator({
         onResult: (evaluated) => {
-          // A geometry problem replaces whatever was on screen, because it is the more
-          // urgent thing to say. A clean rebuild leaves the existing message alone — it is
-          // usually the summary of what was just built, and blanking it the moment the
-          // worker replies would make that message flash and vanish.
+          /*
+           * A geometry problem replaces whatever was on screen, because it is the more urgent
+           * thing to say. A clean rebuild keeps an *informational* message — it is usually the
+           * summary of what was just built, and blanking it the moment the worker replies
+           * would make that message flash and vanish.
+           *
+           * It does not keep a stale complaint. A fresh sketch feature reports "the sketch is
+           * empty", which is true for the second it exists and false as soon as anything is
+           * drawn — and it stayed on screen while a solid sat in the viewport, which reads as
+           * the drawing having failed. A problem that has been fixed is not news.
+           */
           const problem = noticeFor(get().doc, evaluated);
-          set(problem ? { evaluated, notice: problem } : { evaluated });
+          if (problem) { set({ evaluated, notice: problem }); return; }
+
+          const stale = get().notice;
+          set(stale && stale.tone !== 'info' ? { evaluated, notice: null } : { evaluated });
         },
         onError: (message) => set({ notice: { tone: 'error', text: message }, building: false }),
         onBusy: (busy) => set({ building: busy }),
@@ -492,6 +538,238 @@ export const useModel = create<ModelState>((set, get) => ({
     const added = doc.features[doc.features.length - 1];
     get().commit(doc, `add ${added.name}`);
     set({ selectedFeatureId: added.id, editingFeatureId: added.id });
+  },
+
+  /**
+   * Pushes or pulls a face along its own normal.
+   *
+   * Grabbing a face and dragging it is how modelling actually feels in every package people
+   * come here from, and until now everything had to go through the tree: choose the operation,
+   * then describe in numbers the thing you were already pointing at.
+   *
+   * It stays parametric. The drag does not move vertices — it adds an extrude whose profile is
+   * that face's own outline, on that face's own plane, with the drag as its distance. So the
+   * result is a feature you can reopen, re-dimension, suppress or delete, exactly like one
+   * added from the toolbar. Direct manipulation that quietly produced unparameterised geometry
+   * would be a worse trade than the tree it replaced.
+   *
+   * Pulling out adds material and pushing in cuts it, which is the sign of the distance along
+   * the face's outward normal and needs no separate control.
+   */
+  pushPull(faceId, distance) {
+    if (!(Math.abs(distance) > 1e-6)) {
+      return { ok: false, message: 'That drag was too small to build anything from.' };
+    }
+
+    const mesh = get().evaluated.mesh;
+    const graph = buildFaceGraph(mesh);
+    const face = graph.faces.get(faceId);
+
+    if (!face) {
+      const message = 'That face is no longer part of the model.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    if (face.tag.kind !== 'planar') {
+      const message =
+        `A ${face.tag.kind} face is curved. Push and pull works on flat faces — a curved one `
+        + 'has no single direction to move along.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    const outline = faceBoundary(mesh, faceId);
+    if (!outline) {
+      const message = 'That face has no closed outline to build from.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    // The face's plane, and its outline expressed in that plane's own two axes — which is the
+    // form a profile takes.
+    const plane = planeFrom(face.centroid, face.axis);
+    const flatten = (loop: Vec3[]): number[] => {
+      const out: number[] = [];
+      for (const point of loop) {
+        const d: Vec3 = [
+          point[0] - plane.origin[0], point[1] - plane.origin[1], point[2] - plane.origin[2],
+        ];
+        out.push(
+          d[0] * plane.u[0] + d[1] * plane.u[1] + d[2] * plane.u[2],
+          d[0] * plane.v[0] + d[1] * plane.v[1] + d[2] * plane.v[2],
+        );
+      }
+      return out;
+    };
+
+    const holePoints: number[] = [];
+    const holeLengths: number[] = [];
+    for (const hole of outline.holes) {
+      holeLengths.push(hole.length);
+      holePoints.push(...flatten(hole));
+    }
+
+    // Pulling out grows the part; pushing in cuts into it. The extrude always runs a positive
+    // distance along the face normal, and the operation carries the direction — a negative
+    // extrude distance is not something the kernel takes.
+    const outward = distance > 0;
+    const doc = addFeature(get().doc, 'extrude', {
+      shape: 'points',
+      points: flatten(outline.outer),
+      ...(holeLengths.length > 0 ? { holePoints, holeLengths } : {}),
+      planeOrigin: [plane.origin[0], plane.origin[1], plane.origin[2]],
+      planeNormal: outward
+        ? [face.axis[0], face.axis[1], face.axis[2]]
+        : [-face.axis[0], -face.axis[1], -face.axis[2]],
+      distance: Math.round(Math.abs(distance) * 100) / 100,
+      operation: outward ? 'add' : 'cut',
+    }, outward ? 'Pull' : 'Push');
+
+    const added = doc.features[doc.features.length - 1]!;
+    get().commit(doc, `${outward ? 'pull' : 'push'} ${added.name}`);
+    set({
+      selectedFeatureId: added.id,
+      editingFeatureId: added.id,
+      selectedFaces: [],
+      notice: {
+        tone: 'info',
+        text: `${added.name} ${Math.abs(distance).toFixed(1)} mm. It is a feature like any `
+          + 'other — reopen it to type an exact distance.',
+      },
+    });
+
+    return { ok: true, message: `${added.name} ${Math.abs(distance).toFixed(1)} mm.` };
+  },
+
+  /**
+   * Adds a blend already scoped to the faces the user picked.
+   *
+   * The two-step version — add a Fillet, then hunt for the face list and fill it in — is the
+   * long way round to the commonest operation in modelling. Picking the faces first and saying
+   * what to do with them is the order people actually work in.
+   */
+  addScoped(kind, faces) {
+    const doc = addFeature(get().doc, kind, { ...defaultParams(kind), faces: [...faces] });
+    const added = doc.features[doc.features.length - 1]!;
+    get().commit(doc, `add ${added.name}`);
+    set({ selectedFeatureId: added.id, editingFeatureId: added.id });
+  },
+
+  /**
+   * Drills into the face the user picked, at its centre.
+   *
+   * The hole feature cuts downwards from the top of the part, so a face that is not the top is
+   * refused rather than drilled somewhere the user did not point at. That is a real limitation
+   * of the feature and saying so beats putting a hole through the wrong face.
+   */
+  drillOnFace(faceId) {
+    const graph = buildFaceGraph(get().evaluated.mesh);
+    const face = graph.faces.get(faceId);
+
+    if (!face) {
+      const message = 'That face is no longer part of the model.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    if (face.axis[2] < 0.9) {
+      const message =
+        'Holes are drilled downwards from the top of the part. Rotate the part so the face '
+        + 'you want to drill points up, or place the hole by its X and Y.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    const doc = addFeature(get().doc, 'hole', {
+      ...defaultParams('hole'),
+      x: Math.round(face.centroid[0] * 100) / 100,
+      y: Math.round(face.centroid[1] * 100) / 100,
+    });
+
+    const added = doc.features[doc.features.length - 1]!;
+    get().commit(doc, `add ${added.name}`);
+    set({ selectedFeatureId: added.id, editingFeatureId: added.id, selectedFaces: [] });
+    return { ok: true, message: `${added.name} drilled at the centre of the face you picked.` };
+  },
+
+  /** Stands a rib on the picked face, running along its longer direction. */
+  ribOnFace(faceId) {
+    const mesh = get().evaluated.mesh;
+    const graph = buildFaceGraph(mesh);
+    const face = graph.faces.get(faceId);
+
+    if (!face || face.tag.kind !== 'planar') {
+      const message = 'A rib needs a flat face to stand on.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    const bb = bounds(mesh);
+    const doc = addFeature(get().doc, 'rib', {
+      ...defaultParams('rib'),
+      // Along the part's longer horizontal direction, which is where a stiffener does the most
+      // good and is what someone dropping a rib on a face means by it.
+      length: Math.round(Math.max(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1]) * 0.8),
+      x: Math.round(face.centroid[0] * 100) / 100,
+      y: Math.round(face.centroid[1] * 100) / 100,
+    });
+
+    const added = doc.features[doc.features.length - 1]!;
+    get().commit(doc, `add ${added.name}`);
+    set({ selectedFeatureId: added.id, editingFeatureId: added.id, selectedFaces: [] });
+    return { ok: true, message: `${added.name} added on the face you picked.` };
+  },
+
+  /**
+   * Starts a feature on the face the user picked, rather than on a named plane.
+   *
+   * The thing that separates modelling from assembling primitives. Everything real is built
+   * on the part it sits on: a boss on the face under it, a pocket into the face you can see.
+   * Until this existed every profile had to be drawn on Top, Front or Right and then dragged
+   * into place by hand, which is not the same operation and does not stay put when the part
+   * underneath it changes.
+   *
+   * The face's own plane is stored, not a reference to the face id. A face id is a position in
+   * a triangle list and does not survive the part being rebuilt with different parameters; a
+   * plane is geometry and does. It does mean the sketch stays where the face *was* rather than
+   * following it, which is a real limitation and an honest one — the alternative silently
+   * moves a feature to whatever face inherited the number.
+   */
+  sketchOnFace(faceId, kind) {
+    const mesh = get().evaluated.mesh;
+    const graph = buildFaceGraph(mesh);
+    const face = graph.faces.get(faceId);
+
+    if (!face) {
+      const message = 'That face is no longer part of the model.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    if (face.tag.kind !== 'planar') {
+      const message =
+        `A ${face.tag.kind} face is curved, and a profile needs somewhere flat to sit. ` +
+        'Pick a flat face.';
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    const doc = addFeature(get().doc, kind, {
+      ...defaultParams(kind),
+      planeOrigin: [face.centroid[0], face.centroid[1], face.centroid[2]],
+      planeNormal: [face.axis[0], face.axis[1], face.axis[2]],
+    });
+
+    const added = doc.features[doc.features.length - 1]!;
+    get().commit(doc, `add ${added.name}`);
+    set({
+      selectedFeatureId: added.id,
+      editingFeatureId: added.id,
+      selectedFaces: [],
+      notice: { tone: 'info', text: `${added.name} is on the face you picked.` },
+    });
+    return { ok: true, message: `${added.name} is on the face you picked.` };
   },
 
   setParams(id, params) {
@@ -639,6 +917,10 @@ export const useModel = create<ModelState>((set, get) => ({
         lastRequest: prompt,
         selectedFeatureId: result.doc.features[0]?.id ?? null,
         editingFeatureId: result.doc.features[0]?.id ?? null,
+        // Kept so the steps can be shown. A conclusion nobody can inspect is one nobody can
+        // correct, and the person who can tell that a 400 mm bracket came out at 180 is the
+        // one reading them.
+        reasoning: result.reasoning,
       });
 
       // Corrections are surfaced, never swallowed. A dimension quietly clamped is a part
@@ -648,7 +930,16 @@ export const useModel = create<ModelState>((set, get) => ({
         : '';
 
       const message = `${result.message}${extra}${nearMissNote}`;
-      set({ notice: { tone: result.corrections.length > 0 ? 'warn' : 'info', text: message } });
+
+      // A requirement that was not met is a warning even when nothing else went wrong: the part
+      // is not what was asked for, and looking finished is the failure mode worth avoiding.
+      const missed = !result.reasoning.satisfied && result.reasoning.checks.length > 0;
+      set({
+        notice: {
+          tone: result.corrections.length > 0 || missed ? 'warn' : 'info',
+          text: message,
+        },
+      });
       return { ok: true, message };
     } catch (e) {
       const message = e instanceof Error ? e.message : 'That could not be built.';
@@ -791,7 +1082,91 @@ export const useModel = create<ModelState>((set, get) => ({
     }
 
     const base = emptyDocument('Traced part');
+
+    // A symmetric silhouette is a turned part, and the honest thing to build from it is a
+    // revolve. Extruding it regardless — which is what this did — turns a photograph of a
+    // bottle into a flat plate shaped like a bottle, and made the image importer useless for
+    // anything round. The tracer has always worked this out; nothing acted on it.
+    /*
+     * A surface we can see beats a symmetry we inferred.
+     *
+     * A silhouette symmetric about its vertical centreline usually means a turned part, and
+     * revolving it is right for a bottle photographed side-on. It is wrong for a domed cover
+     * photographed from above: that outline is a circle, symmetric about *both* axes, and
+     * revolving it produces a sphere — a guess about the half nobody photographed, in place of
+     * the half that is right there in the shading.
+     *
+     * So symmetry about both axes, together with a surface the shading can actually be read
+     * from, means we are looking at a face rather than a profile, and the measured relief wins
+     * over the assumed revolution.
+     */
+    const relief = reliefFromImage(image, traced.profile.outer, traced.profile.holes, mmPerPixel);
+    const readable = relief !== null
+      && relief.shading > 0.08
+      && relief.obliquity < 0.35
+      && relief.reliefRatio > 0.002;
+
+    const facingUs = readable && symmetricBothWays(traced.profile.outer);
+
+    // Holes rule a revolve out. A picture you can see through is a plan view, not a
+    // silhouette: a washer photographed flat shows its bore, and revolving half of its outer
+    // circle would give a sphere and lose the bore entirely. Revolving a section with holes
+    // in it is a different operation, and pretending otherwise would quietly destroy the
+    // feature that made the part a washer.
+    const revolvable = traced.suggestion.operation === 'revolve'
+      && traced.suggestion.axis
+      && traced.profile.holes.length === 0
+      && !facingUs;
+
+    const half = revolvable
+      ? halfProfile(traced.profile.outer, traced.suggestion.axis!.origin[0])
+      : [];
+
+    if (half.length >= 3) {
+      const halfPoints: number[] = [];
+      for (const [x, y] of half) halfPoints.push(x, y);
+
+      const revolved = addFeature(base, 'revolve', {
+        plane: 'XZ', shape: 'points', points: halfPoints, angle: 360, operation: 'add',
+      }, 'Traced revolve');
+
+      get().commitImported(revolved, 'trace image');
+
+      const message =
+        `Traced ${traced.report.widthMm.toFixed(1)} x ${traced.report.heightMm.toFixed(1)} mm ` +
+        `and revolved it. ${traced.suggestion.reason}`;
+      set({ notice: { tone: 'info', text: message } });
+      return { ok: true, message };
+    }
+
+    /*
+     * A relief, when the picture has a surface in it to recover.
+     *
+     * Three conditions, and all of them have to hold. The brightness has to vary inside the
+     * outline, or there is no surface — a screenshot or a laser-cut blank is one flat tone and
+     * a relief from it is noise given a shape. The light has to be near the view direction,
+     * because that is the case the reconstruction solves exactly and a side light makes it
+     * build a ridge leaning into the lamp. And the recovered surface has to be tall enough to
+     * be worth having relative to the part, or it is measurement noise.
+     *
+     * Failing any of them, the flat extrusion is still the right answer and is what gets built.
+     */
+    const worthIt = readable;
+
+    const reliefParams: Record<string, ParamValue> = worthIt && relief
+      ? {
+          reliefField: Array.from(relief.height, (v) => Math.round(v * 1000) / 1000),
+          reliefWidth: relief.width,
+          reliefHeight: relief.height_,
+          reliefScale: mmPerPixel,
+          // Depth relative to the part, not absolute: a photograph carries no scale, and the
+          // reconstruction gives proportions rather than millimetres.
+          reliefDepth: Math.round(traced.report.widthMm * relief.reliefRatio * 100) / 100,
+        }
+      : {};
+
     const doc = addFeature(base, 'extrude', {
+      ...reliefParams,
       plane: 'XY', shape: 'points', points, holePoints, holeLengths,
       distance: thickness, operation: 'add',
       // The width the points were traced at, and the width in force. They start equal; editing
@@ -801,12 +1176,22 @@ export const useModel = create<ModelState>((set, get) => ({
       width: traced.report.widthMm,
     }, 'Traced outline');
 
-    get().commit(doc, 'trace image');
+    get().commitImported(doc, 'trace image');
+
+    const shape = worthIt && relief
+      ? ` Recovered a surface from the shading, ${reliefParams.reliefDepth} mm deep — ` +
+        'the outline is traced, the depth is read off how the light falls.'
+      : relief && relief.obliquity >= 0.35
+        ? ' Left flat: the light is too far off to one side to read the surface from it.'
+        : relief && relief.shading <= 0.08
+          ? ' Left flat: the picture is one even tone inside the outline, so there is no ' +
+            'surface in it to recover.'
+          : '';
 
     const message =
       `Traced ${traced.report.widthMm.toFixed(1)} x ${traced.report.heightMm.toFixed(1)} mm: ` +
       `${traced.report.linesRecognised} straight edges, ${traced.report.arcsRecognised} arcs, ` +
-      `${traced.report.holesFound} hole${traced.report.holesFound === 1 ? '' : 's'}.`;
+      `${traced.report.holesFound} hole${traced.report.holesFound === 1 ? '' : 's'}.${shape}`;
 
     set({ notice: { tone: 'info', text: message } });
     return { ok: true, message };
@@ -820,13 +1205,19 @@ export const useModel = create<ModelState>((set, get) => ({
       return { ok: false, message };
     }
 
+    // One feature per body. A multi-body part is several solids, and merging them into one
+    // feature would hide that — and make each body unrecognisable, because a fitter reading
+    // the union of two clips sees neither.
     const base = emptyDocument(read.name);
-    const doc = addFeature(
-      base, 'imported',
-      { __mesh: read.mesh as unknown as ParamValue, operation: 'add' },
-      'Imported solid',
-    );
-    get().commit(doc, 'import STEP');
+    let doc = base;
+    for (const body of read.bodies) {
+      doc = addFeature(
+        doc, 'imported',
+        { __mesh: body.mesh as unknown as ParamValue, operation: 'place' },
+        read.bodies.length === 1 ? 'Imported solid' : body.name,
+      );
+    }
+    get().commitImported(doc, 'import STEP');
 
     const b = bounds(read.mesh);
     const size = [0, 1, 2].map((i) => (b.max[i]! - b.min[i]!).toFixed(1)).join(' × ');
@@ -835,7 +1226,8 @@ export const useModel = create<ModelState>((set, get) => ({
     // Size and mass first, then the caveats. A user reads the first clause as the verdict, and
     // leading with what could not be read makes a successful import look like a failure.
     const message = [
-      `Read ${read.faces} face${read.faces === 1 ? '' : 's'} — a solid ${size} mm, ` +
+      `Read ${read.faces} face${read.faces === 1 ? '' : 's'} — ` +
+      `${read.bodies.length === 1 ? 'a solid' : `${read.bodies.length} bodies`} ${size} mm, ` +
       `${formatGrams(grams)}.`,
       ...read.notes,
       'Press Recognise to read it back into an editable shape.',
@@ -867,7 +1259,7 @@ export const useModel = create<ModelState>((set, get) => ({
 
     const base = emptyDocument('From drawing');
     const doc = addFeature(base, 'imported', { __mesh: built.mesh as unknown as ParamValue, operation: 'add' }, 'Reconstructed solid');
-    get().commit(doc, 'import drawing');
+    get().commitImported(doc, 'import drawing');
 
     // Lead with what was built, then the caveats.
     //

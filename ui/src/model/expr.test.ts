@@ -170,6 +170,19 @@ describe('parameters drive the model', () => {
 
   it('resolves the same values whichever way it is asked', () => {
     const doc = driven(250);
-    expect(parametersOf(doc)).toEqual({ plateLength: 250, plateWidth: 150 });
+    const values = parametersOf(doc);
+
+    expect(values.plateLength).toBe(250);
+    expect(values.plateWidth).toBe(150);
+  });
+
+  it('offers each feature’s own dimensions alongside the named parameters', () => {
+    // The scope is not only the parameter table any more: every feature dimension is in it
+    // under `Feature.parameter`, which is what lets one feature be driven by another.
+    const values = parametersOf(driven(250));
+    const features = Object.keys(values).filter((k) => k.includes('.'));
+
+    expect(features.length).toBeGreaterThan(0);
+    for (const key of features) expect(Number.isFinite(values[key])).toBe(true);
   });
 });

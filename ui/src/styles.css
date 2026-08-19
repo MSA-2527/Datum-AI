@@ -2844,6 +2844,60 @@ select:focus {
 .tr-what li strong { color: var(--fg-2, #aeb6c4); }
 
 
+/* ── dimensions on the sketch ───────────────────────────────────────────── */
+
+/*
+ * A size on the drawing is a control, not a caption — clicking one types a new value — so it
+ * is styled as something you can press. A *driven* dimension is drawn in the accent colour
+ * because "this is 100 because I said so" and "this happens to measure 100" are different
+ * facts about a design, and a drawing that does not distinguish them is a drawing you cannot
+ * trust.
+ */
+.sk-dimtext {
+  font: 500 2.6px ui-monospace, Menlo, monospace;
+  fill: var(--fg-3, #8b93a3);
+  cursor: pointer;
+  paint-order: stroke;
+  stroke: var(--bg-1, #0e1116);
+  stroke-width: 0.9px;
+}
+
+.sk-dimtext:hover { fill: var(--fg-1, #e6e9ef); }
+.sk-dimtext.is-driven { fill: var(--acc, #4a9eff); font-weight: 700; }
+
+.sk-size {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--fg-2, #aeb6c4);
+  background: var(--bg-3, #1b202b);
+  border: 1px solid var(--acc, #4a9eff);
+  border-radius: 6px;
+}
+
+.sk-size label { font-weight: 600; }
+.sk-size input { width: 80px; }
+
+.sk-size button {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--fg-2, #aeb6c4);
+  background: var(--bg-2, #151922);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.sk-size button.primary {
+  color: #fff;
+  background: var(--acc, #4a9eff);
+  border-color: var(--acc, #4a9eff);
+}
+
+
 /* ── what a bulk teach did to each file ─────────────────────────────────── */
 
 .tr-report {
@@ -3267,3 +3321,77 @@ select:focus {
 }
 .mt-expr-ok { font: 500 10.5px/1.3 ui-monospace, Menlo, monospace; color: var(--ok, #4ec9a5); }
 .mt-expr-err { font-size: 10.5px; color: var(--err, #e05c5c); }
+
+.mt-field input[type='color'] {
+  width: 100%; height: 26px; padding: 2px; border-radius: 4px; cursor: pointer;
+  background: var(--bg-2, #1b1f27); border: 1px solid var(--line, #2b3140);
+}
+.mt-swatch-note { font-size: 11px; color: var(--fg-3, #8b93a3); }
+
+/* Rubber-band face sweep. */
+.vp3d-band {
+  position: absolute; pointer-events: none; z-index: 5;
+  border: 1px solid var(--acc, #4a9eff);
+  background: color-mix(in srgb, var(--acc, #4a9eff) 14%, transparent);
+}
+
+/* Right-click menu in the viewport. */
+.vp3d-menu {
+  position: absolute; z-index: 20; min-width: 190px; padding: 4px;
+  display: flex; flex-direction: column;
+  background: var(--bg-1, #12151c); border: 1px solid var(--line, #2b3140);
+  border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.vp3d-menu button {
+  text-align: left; padding: 6px 10px; border: 0; border-radius: 4px;
+  background: transparent; color: var(--fg-1, #e6e9ef); font-size: 12px; cursor: pointer;
+}
+.vp3d-menu button:hover:not(:disabled) { background: var(--bg-3, #232833); }
+.vp3d-menu button:disabled { color: var(--fg-3, #8b93a3); cursor: default; }
+
+/* What the size model has learned. */
+.tr-model {
+  margin: 10px 0; padding: 10px 12px; border-radius: 6px;
+  background: var(--bg-2, #1b1f27); border: 1px solid var(--line, #2b3140);
+}
+.tr-model-head {
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--fg-3, #8b93a3); margin-bottom: 6px;
+}
+.tr-model p { margin: 0; font-size: 12px; color: var(--fg-2, #b6bdcb); }
+.tr-model-guess { margin-top: 8px !important; color: var(--fg-1, #e6e9ef) !important; }
+
+/* The reasoning chain behind the last build. */
+.as-reasoning {
+  margin: 8px 0; padding: 8px 10px; border-radius: 6px;
+  background: var(--bg-2, #1b1f27); border: 1px solid var(--line, #2b3140);
+  font-size: 12px;
+}
+.as-reasoning > summary { cursor: pointer; color: var(--fg-2, #b6bdcb); }
+.as-reasoning > summary b { color: var(--warn, #e0a03a); font-weight: 600; }
+.as-reasoning ol { margin: 8px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.as-reasoning li { color: var(--fg-2, #b6bdcb); }
+.as-reasoning li strong { display: block; color: var(--fg-1, #e6e9ef); font-size: 11px; }
+.as-reasoning li[data-acted] strong::after { content: ' — changed the part'; color: var(--acc, #4a9eff); font-weight: 400; }
+
+/* Section plane controls, under the view buttons. */
+.vp3d-section {
+  position: absolute; top: 42px; right: 10px; z-index: 6;
+  display: flex; align-items: center; gap: 4px; padding: 4px 6px;
+  background: var(--bg-1, #12151c); border: 1px solid var(--line, #2b3140); border-radius: 6px;
+}
+.vp3d-section button {
+  min-width: 22px; padding: 2px 6px; font-size: 11px; border-radius: 4px;
+  background: transparent; color: var(--fg-2, #b6bdcb); border: 1px solid transparent; cursor: pointer;
+}
+.vp3d-section button[aria-pressed='true'] {
+  background: var(--acc, #4a9eff); color: #fff; border-color: var(--acc, #4a9eff);
+}
+.vp3d-section input[type='range'] { width: 110px; }
+
+/* Distance readout while a face is being pushed or pulled. */
+.vp3d-push {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 8;
+  padding: 4px 10px; border-radius: 4px; font-size: 12px; font-variant-numeric: tabular-nums;
+  background: var(--acc, #4a9eff); color: #fff; pointer-events: none;
+}

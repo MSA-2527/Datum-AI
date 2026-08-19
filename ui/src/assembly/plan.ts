@@ -19,11 +19,11 @@
  */
 
 import {
-  IDENTITY_PLACEMENT, addFeature, emptyDocument,
-  type Document, type FeatureKind, type ParamValue, type Placement,
+  IDENTITY_PLACEMENT, addFeature, applyFeature, defaultParams, emptyDocument, paramFields,
+  type Document, type Feature, type FeatureKind, type ParamValue, type Placement,
 } from '../model/document';
 import { ARCHETYPES, archetypeById } from '../generate/archetypes';
-import { bounds, massProperties } from '../kernel/topo/mesh';
+import { bounds, massProperties, triCount, type Mesh } from '../kernel/topo/mesh';
 import { evaluateExpr, readNumber, resolveParameters } from '../model/expr';
 
 // ── the plan ─────────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ export interface AssemblyPlan {
  * Its profile travels in `params.sketch` as the document's own JSON wire form, which the
  * schema already allows: a parameter may be a string.
  */
-const PRIMITIVE_KINDS = new Set<FeatureKind>(['box', 'cylinder', 'sphere', 'sketch']);
+const PRIMITIVE_KINDS = new Set<FeatureKind>(['box', 'cylinder', 'sphere', 'sketch', 'loft', 'sweep']);
 
 export const isPrimitive = (shape: string): boolean => PRIMITIVE_KINDS.has(shape as FeatureKind);
 export const isArchetype = (shape: string): boolean => archetypeById(shape) !== undefined;
@@ -260,7 +260,22 @@ export function validatePlan(raw: unknown): ValidationResult | { error: string }
         params[spec.key] = v ?? spec.value;
       }
     } else {
+      // Some parameters are choices, not quantities: a loft names the plane it is built on and
+      // the shape of each end. Running those through the expression evaluator reported "there
+      // is no parameter called rect" and dropped them, which left the loft to fall back on its
+      // defaults — a wing that quietly rebuilt itself as the stock 60 mm transition.
+      //
+      // Which keys are choices is asked of the feature rather than listed here, so a new
+      // choice parameter cannot be forgotten in this one place.
+      const choices = new Set(
+        paramFields(shape as FeatureKind, c.params as Record<string, ParamValue> | undefined)
+          .filter((f) => f.kind === 'choice')
+          .map((f) => f.key),
+      );
+
       for (const [key, value] of Object.entries(c.params ?? {})) {
+        if (choices.has(key) && typeof value === 'string') { params[key] = value; continue; }
+
         // Primitives have no declared ranges, so only obvious nonsense is caught.
         const v = check(value, key, -100_000, 100_000, 'mm');
         if (v !== undefined) params[key] = v;
@@ -400,6 +415,13 @@ export function buildAssembly(plan: AssemblyPlan): Document {
         : component.placement;
 
       const params: Record<string, ParamValue> = { ...component.params };
+
+      // The component's material travels onto the feature so the viewport can colour a brass
+      // bush like brass. It does not set the mass: an assembly is weighed from the bill of
+      // materials, each line at its own density, and that number is already on the document.
+      if (component.material && component.material !== 'Unspecified') {
+        params.material = component.material;
+      }
       // The operation applies whichever route builds the shape. Setting it only on the
       // primitive branch meant an archetype marked as a cut was quietly unioned instead.
       params.operation =
@@ -545,9 +567,14 @@ export function mirrorForInstance(base: Placement, index: number): Placement {
   // Only Y was handled, so a component placed off-centre in X — a rocket's second pair of
   // fins, anything arranged fore and aft — put both copies in the same place instead of
   // opposite each other. The result was a cruciform with two fins.
+  //
+  // Reflected, not just moved. Negating the position alone is right for a symmetric component
+  // and wrong for a handed one: a lofted wing grows outboard from its root, so the copy at
+  // -y grew back through the fuselage and the aircraft finished with both wings on one side.
+  // A mirror is what a pair of components actually is.
   if (index === 1) {
-    if (Math.abs(base.y) > 1e-6) return { ...base, y: -base.y };
-    if (Math.abs(base.x) > 1e-6) return { ...base, x: -base.x };
+    if (Math.abs(base.y) > 1e-6) return { ...base, y: -base.y, mirror: 'y' };
+    if (Math.abs(base.x) > 1e-6) return { ...base, x: -base.x, mirror: 'x' };
   }
 
   // Beyond a mirrored pair there is no general rule for where copies go, so they are nudged
@@ -624,6 +651,16 @@ export function resolveComponentParams(
   return out;
 }
 
+/** Bounding half-extents, centre and volume of a mesh, in the form the inspector wants. */
+function measureOf(mesh: Mesh): ShapeMeasure {
+  const b = bounds(mesh);
+  return {
+    volume: Math.abs(massProperties(mesh).volume),
+    half: [(b.max[0] - b.min[0]) / 2, (b.max[1] - b.min[1]) / 2, (b.max[2] - b.min[2]) / 2],
+    centre: [(b.max[0] + b.min[0]) / 2, (b.max[1] + b.min[1]) / 2, (b.max[2] + b.min[2]) / 2],
+  };
+}
+
 export function measureShape(c: ComponentSpec, values: Record<string, number> = {}): ShapeMeasure {
   // A parameter may now be an expression over the plan's own driving dimensions, so the whole
   // set is resolved up front. Passing no values resolves literals only, which is what every
@@ -649,6 +686,41 @@ export function measureShape(c: ComponentSpec, values: Record<string, number> = 
       const r = (p.diameter ?? 0) / 2;
       return { volume: (4 / 3) * Math.PI * r ** 3, half: [r, r, r], centre: [0, 0, 0] };
     }
+    /*
+     * Lofts and sweeps are measured by building them.
+     *
+     * Every other primitive here has a closed-form volume, and a loft does not — its volume
+     * depends on how its two sections correspond, which is the loft's own business. Writing a
+     * formula for the common cases would be a second geometry model that agrees with the
+     * kernel until the day it does not; a wing that the inspector believed had no volume at
+     * all is exactly that failure, and it is the reason this branch exists rather than a
+     * length x width x height guess.
+     */
+    case 'loft':
+    case 'sweep': {
+      const key = `${c.shape}|${JSON.stringify(p)}`;
+      const hit = measured.get(key);
+      if (hit) return hit;
+
+      const doc = emptyDocument();
+      const feature: Feature = {
+        id: 'measure', name: c.name, kind: c.shape as FeatureKind,
+        params: { ...defaultParams(c.shape as FeatureKind), ...c.params },
+        suppressed: false,
+      };
+
+      const built = applyFeature(
+        { positions: new Float64Array(0), indices: new Uint32Array(0), faceIds: new Uint32Array(0), tags: new Map() },
+        feature, doc,
+      );
+
+      const value = built.mesh && triCount(built.mesh) > 0
+        ? measureOf(built.mesh)
+        : ZERO;
+      measured.set(key, value);
+      return value;
+    }
+
     default: {
       const archetype = archetypeById(c.shape);
       if (!archetype) return ZERO;

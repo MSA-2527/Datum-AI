@@ -557,11 +557,38 @@ function matTVecLocal(m: Matrix, x: Float64Array): Float64Array {
  * fillet does not need thousands of segments everywhere else to look right.
  */
 export function tessellateCurve(c: NurbsCurve, tol = 0.01, maxDepth = 18): Vec3[] {
-  const out: Vec3[] = [];
-  const start = curvePoint(c, 0);
-  out.push(start);
-  recurse(c, 0, 1, curvePoint(c, 0), curvePoint(c, 1), tol, out, 0, maxDepth);
-  out.push(curvePoint(c, 1));
+  /*
+   * Subdivided span by span, not over the whole parameter range at once.
+   *
+   * The flatness test compares the midpoint against the chord, and that test is only sound
+   * where the curve is a single polynomial piece. Applied across the whole of a curve that
+   * loops — a helix is the plain case — it aliases catastrophically: for a four-turn helix
+   * the start, middle and end points are nearly collinear up the axis, the sagitta is tiny,
+   * and the recursion stops immediately. The curve tessellated to three points, so a spring
+   * swept along it came out 6 mm tall instead of 54 mm and weighed a fortieth of the wire it
+   * is made from.
+   *
+   * Between two distinct knots the curve is one polynomial and cannot fold back on itself, so
+   * the test means there what it is supposed to mean.
+   */
+  const knots = c.knots;
+  const first = knots[c.degree]!;
+  const last = knots[knots.length - c.degree - 1]!;
+
+  const breaks: number[] = [first];
+  for (let i = c.degree + 1; i < knots.length - c.degree - 1; i++) {
+    const u = knots[i]!;
+    if (u > breaks[breaks.length - 1]! + 1e-12 && u < last - 1e-12) breaks.push(u);
+  }
+  breaks.push(last);
+
+  const out: Vec3[] = [curvePoint(c, first)];
+  for (let i = 0; i < breaks.length - 1; i++) {
+    const u0 = breaks[i]!;
+    const u1 = breaks[i + 1]!;
+    recurse(c, u0, u1, curvePoint(c, u0), curvePoint(c, u1), tol, out, 0, maxDepth);
+    out.push(curvePoint(c, u1));
+  }
   return out;
 }
 

@@ -18,7 +18,7 @@
  */
 
 import {
-  add3, matMul, mul3, norm3, rad, rotation, translation,
+  add3, matMul, mul3, norm3, rad, reflection, rotation, translation,
   type Mat4, type Vec2, type Vec3,
 } from '../kernel/math/vec';
 import {
@@ -30,16 +30,18 @@ import {
   circleProfile, makeProfile, polygonProfile, rectProfile, slotProfile, type Profile,
 } from '../kernel/sketch/profile';
 import {
-  XY, XZ, YZ, box, cylinder, extrude, planeFrom, revolve, sphere, type Plane,
+  XY, XZ, YZ, box, cone, cylinder, extrude, loft, planeFrom, revolve, sphere, sweep, type Plane,
 } from '../kernel/ops/build';
+import { interpolateCurve, lineToNurbs, type NurbsCurve } from '../kernel/math/nurbs';
 import { boolean, subtractAll } from '../kernel/ops/boolean';
+import { displaceFaces, facesFacing, subdivide } from '../kernel/ops/subdivide';
 import { sketchFromJson, solveForProfile } from '../kernel/sketch/document';
 import {
   chamferEdges, circularPattern, filletEdges, linearPattern, mirrorBody, sharpEdges, shell,
 } from '../kernel/ops/modify';
 import { archetypeById } from '../generate/archetypes';
 import { type MateKind } from '../kernel/assembly/assembly';
-import { readNumber, resolveParameters } from './expr';
+import { evaluateExpr, readNumber, resolveParameters } from './expr';
 
 // ── features ─────────────────────────────────────────────────────────────────
 
@@ -47,7 +49,8 @@ export type FeatureKind =
   | 'archetype'
   | 'box' | 'cylinder' | 'sphere'
   | 'sketch'
-  | 'extrude' | 'revolve'
+  | 'extrude' | 'revolve' | 'loft' | 'sweep'
+  | 'rib' | 'draft' | 'dome' | 'split' | 'datum' | 'wrap'
   | 'hole' | 'pocket' | 'slot'
   | 'fillet' | 'chamfer' | 'shell'
   | 'patternLinear' | 'patternCircular' | 'mirror'
@@ -81,6 +84,17 @@ export interface Placement {
   x: number; y: number; z: number;
   /** Rotation about each axis, degrees, applied Z then Y then X. */
   rx: number; ry: number; rz: number;
+  /**
+   * Reflect the body in the plane through its own origin normal to this axis, before the
+   * rotation and translation.
+   *
+   * A mirror is not a rotation, and treating it as one is a mistake that only stays hidden
+   * while every part is symmetric. An assembly places its second instance of a paired
+   * component by negating its position — which is right for a box and wrong for anything with
+   * a handedness. A lofted wing grows outboard from its root, so the mirrored copy grew back
+   * through the fuselage and the aircraft had two left wings on the same side.
+   */
+  mirror?: 'x' | 'y' | 'z';
 }
 
 export const IDENTITY_PLACEMENT: Placement = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
@@ -309,8 +323,77 @@ export function parametersOf(doc: Document): Record<string, number> {
   if (hit) return hit;
 
   const { values } = resolveParameters(doc.globals ?? []);
+  withFeatureDimensions(doc, values);
   parameterCache.set(doc, values);
   return values;
+}
+
+/**
+ * The name a feature's dimensions are referred to by.
+ *
+ * Feature names are written for people — "Mid-frame", "Camera lens 1" — and an expression
+ * language cannot take a space or a hyphen without them meaning subtraction. So the reference
+ * name is the feature name with anything else turned into an underscore. It is derived rather
+ * than stored so that renaming a feature renames what its dimensions are called, which is what
+ * anyone would expect; the cost is that an expression naming the old one stops resolving, and
+ * that is reported by name rather than silently read as zero.
+ */
+export function referenceName(name: string): string {
+  const cleaned = name.trim().replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!cleaned) return '';
+  // An identifier cannot start with a digit, and "3rd bracket" is a name someone will use.
+  return /^[0-9]/.test(cleaned) ? `_${cleaned}` : cleaned;
+}
+
+/**
+ * Every feature dimension, added to the value scope as `Feature.parameter`.
+ *
+ * This is what makes the document one parametric model rather than a set of features that
+ * happen to sit in the same file. Without it a wall thickness that has to be twice the plate
+ * thickness can only be typed twice and kept in step by hand, which is exactly the thing a
+ * parametric modeller exists to stop.
+ *
+ * Resolved in tree order, and a feature may only refer to features *before* it. That is the
+ * same rule the tree already obeys — a feature is built onto what precedes it — and it makes
+ * a circular reference impossible to write rather than something to detect and report. It also
+ * means the answer never depends on the order the scope happened to be built in.
+ *
+ * Written into the caller's map rather than returned, because the parameter table it extends
+ * is the same scope: a feature's dimension may be an expression over a global, and a later
+ * feature's may be an expression over that.
+ */
+function withFeatureDimensions(doc: Document, values: Record<string, number>): void {
+  const used = new Set(Object.keys(values));
+
+  for (const f of doc.features) {
+    let name = referenceName(f.name);
+    if (!name) continue;
+
+    // Two features may legitimately share a name. The first one keeps it: silently
+    // redirecting an expression to a different feature would be worse than not resolving.
+    if (used.has(name)) {
+      let n = 2;
+      while (used.has(`${name}_${n}`)) n++;
+      name = `${name}_${n}`;
+    }
+    used.add(name);
+
+    for (const [key, raw] of Object.entries(f.params)) {
+      if (typeof raw === 'number') {
+        if (Number.isFinite(raw)) values[`${name}.${key}`] = raw;
+        continue;
+      }
+      if (typeof raw !== 'string' || !raw.trim()) continue;
+
+      // A sketch travels as JSON and a plane travels as "XZ"; neither is an expression, and
+      // handing a kilobyte of JSON to the tokeniser on every rebuild to be told so is work
+      // done for nothing. Anything with a brace or a quote in it is not arithmetic.
+      if (raw.length > 120 || /["'{}[\]:]/.test(raw)) continue;
+
+      const r = evaluateExpr(raw, values);
+      if (!r.error) values[`${name}.${key}`] = r.value;
+    }
+  }
 }
 
 /** Parameters that could not be worked out, and why. */
@@ -318,8 +401,245 @@ export function parameterErrors(doc: Document): Map<string, string> {
   return resolveParameters(doc.globals ?? []).errors;
 }
 
+/**
+ * What an expression *on a particular feature* may name.
+ *
+ * Narrower than the whole scope, because a feature may only refer to features before it. The
+ * editor offers this rather than everything, so the list a user is shown is the list that
+ * actually resolves — offering a name that will not work is worse than offering none.
+ *
+ * Built by asking the same function about a document truncated at this feature, so the rule
+ * cannot drift away from the one the evaluator applies.
+ */
+export function referenceScopeAt(
+  doc: Document, featureId: string,
+): { name: string; value: number; from: string }[] {
+  const at = doc.features.findIndex((f) => f.id === featureId);
+  const before = at < 0 ? doc.features : doc.features.slice(0, at);
+  return referenceScope({ ...doc, features: before });
+}
+
+/**
+ * Everything an expression in this document may name, with what it currently comes to.
+ *
+ * Offered to the editor so the names are discoverable. A reference language nobody can see the
+ * vocabulary of is one people will not use.
+ */
+export function referenceScope(doc: Document): { name: string; value: number; from: string }[] {
+  const globals = new Set((doc.globals ?? []).map((g) => g.name));
+  return Object.entries(parametersOf(doc))
+    .map(([name, value]) => ({
+      name, value,
+      from: globals.has(name) ? 'parameter' : 'feature',
+    }))
+    .sort((a, b) => (a.from === b.from ? a.name.localeCompare(b.name) : a.from < b.from ? 1 : -1));
+}
+
 const str = (params: Record<string, ParamValue>, key: string, fallback: string): string =>
   typeof params[key] === 'string' ? (params[key] as string) : fallback;
+
+/**
+ * Breaks the edges of a primitive.
+ *
+ * Nothing manufactured has a knife edge. A machined part gets its corners broken by the tool
+ * radius whether anyone asks or not, a casting is drafted and radiused because it has to come
+ * out of the mould, and a sheet part carries the bend radius of the press. A model made of
+ * mathematically sharp prisms does not look like a simplified real part — it looks like a
+ * drawing of blocks, and that is most of the difference between a massing study and something
+ * that reads as a made object.
+ *
+ * Applied by construction here, on the primitive alone before it is placed or combined, so
+ * the blend is on the part rather than on whatever it later happens to touch. A radius the
+ * solid cannot take is dropped rather than raised as an error: an edge break is a finish, and
+ * losing the finish is not a reason to refuse to build the part.
+ */
+function broken(solid: Mesh, radius: number, feature: string): Mesh {
+  if (!(radius > 1e-6)) return solid;
+
+  const bb = bounds(solid);
+  const smallest = Math.min(
+    bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2],
+  );
+  // A blend wider than a third of the thinnest section stops being an edge break and starts
+  // being the shape of the part, which is a decision for whoever drew it, not for a default.
+  if (radius >= smallest / 3) return solid;
+
+  const rounded = filletEdges(solid, { radius, feature });
+  return rounded.valid && triCount(rounded.mesh) > 0 ? rounded.mesh : solid;
+}
+
+/**
+ * A relief carried in a feature's parameters, if it has one.
+ *
+ * The field travels as a flat array of numbers because that is what a parameter is allowed to
+ * be — see the note on hole loops in `profileFrom`. Keeping documents to plain JSON with no
+ * nested structures is what makes them serialise, validate and diff without special cases, and
+ * one index calculation here is a cheaper price than a second shape everywhere else.
+ */
+function reliefFor(p: Record<string, ParamValue>, doc: Document): {
+  field: number[]; width: number; height: number; mmPerPixel: number; depth: number;
+} | null {
+  const field = p.reliefField;
+  if (!Array.isArray(field) || field.length < 4) return null;
+
+  const width = Math.round(num(doc, p, 'reliefWidth', 0));
+  const height = Math.round(num(doc, p, 'reliefHeight', 0));
+  const mmPerPixel = num(doc, p, 'reliefScale', 0);
+  const depth = num(doc, p, 'reliefDepth', 0);
+
+  if (width < 2 || height < 2 || field.length < width * height) return null;
+  if (!(mmPerPixel > 0) || !(Math.abs(depth) > 1e-9)) return null;
+
+  return { field: field as number[], width, height, mmPerPixel, depth };
+}
+
+/**
+ * Pushes the top face of an extrusion out by a height field.
+ *
+ * The face is refined first, because displacing a flat cap made of two triangles moves three
+ * corners and produces a wedge. Four levels takes the two triangles of a rectangular cap to
+ * five hundred, which is enough to carry the shape without making the tree sluggish.
+ */
+function applyRelief(
+  solid: Mesh, relief: { field: number[]; width: number; height: number; mmPerPixel: number; depth: number },
+  feature: string,
+): Mesh {
+  void feature;
+
+  // Four levels. Five is visibly no better on the surface itself and costs four times the
+  // triangles — a dome came out at 127 000 and took 600 ms to rebuild, against 32 000 and
+  // 140 ms. What five improved was the *edge overlay*, which draws the fan of long thin
+  // triangles an ear-clipped cap is made of; that is a display artefact and not a reason to
+  // make every parameter edit four times slower.
+  const fine = subdivide(solid, 4);
+  const top = facesFacing(fine, [0, 0, 1], 10);
+  if (top.size === 0) return solid;
+
+  const { field, width, height, mmPerPixel, depth } = relief;
+
+  return displaceFaces(fine, top, [0, 0, 1], (point) => {
+    // Model millimetres back to the pixel grid the field was measured on.
+    const x = point[0] / mmPerPixel;
+    const y = point[1] / mmPerPixel;
+    if (!(x >= 0 && y >= 0 && x <= width - 1 && y <= height - 1)) return 0;
+
+    const x0 = Math.floor(x), y0 = Math.floor(y);
+    const x1 = Math.min(width - 1, x0 + 1), y1 = Math.min(height - 1, y0 + 1);
+    const fx = x - x0, fy = y - y0;
+
+    const a = field[y0 * width + x0]! * (1 - fx) + field[y0 * width + x1]! * fx;
+    const b = field[y1 * width + x0]! * (1 - fx) + field[y1 * width + x1]! * fx;
+    return (a * (1 - fy) + b * fy) * depth;
+  });
+}
+
+/**
+ * The plane a profile feature is built on.
+ *
+ * Named planes — Top, Front, Right — are what you start from, but nothing real is modelled
+ * only from those: a boss goes on the face of the part it sits on, and a pocket is cut into
+ * the face you can see. So a feature may instead carry `planeOrigin` and `planeNormal`,
+ * written by picking a face in the viewport, and then it is built on that face.
+ *
+ * The named plane stays the fallback rather than being replaced, so an older document, or one
+ * where the face it referred to no longer exists, still builds somewhere sensible instead of
+ * refusing.
+ */
+/**
+ * The plane a named datum feature defines.
+ *
+ * Derived from the datum's parameters every time rather than stored on it, because a stored
+ * plane is a second copy of the answer that goes stale the moment the offset is edited.
+ */
+export function datumPlane(f: Feature, doc: Document): Plane {
+  const num_ = (key: string, fallback: number) => num(doc, f.params, key, fallback);
+
+  const base = planeOf(str(f.params, 'basePlane', 'XY'));
+  const offset = num_('offset', 0);
+
+  const origin: Vec3 = [
+    base.origin[0] + base.normal[0] * offset,
+    base.origin[1] + base.normal[1] * offset,
+    base.origin[2] + base.normal[2] * offset,
+  ];
+
+  const tiltX = rad(num_('tiltX', 0));
+  const tiltY = rad(num_('tiltY', 0));
+
+  // Tilted about the plane's own in-plane axes, so "tilt about X" means the same thing on a
+  // datum parallel to Front as it does on one parallel to Top.
+  const turn = matMul(rotation(base.u, tiltX), rotation(base.v, tiltY));
+  const normal = norm3(xformDirection(turn, base.normal));
+
+  return planeFrom(origin, normal, xformDirection(turn, base.u));
+}
+
+/** Rotates a direction by a matrix, ignoring its translation. */
+function xformDirection(m: Mat4, v: Vec3): Vec3 {
+  return [
+    m[0] * v[0] + m[4] * v[1] + m[8] * v[2],
+    m[1] * v[0] + m[5] * v[1] + m[9] * v[2],
+    m[2] * v[0] + m[6] * v[1] + m[10] * v[2],
+  ];
+}
+
+/** Every datum in the document, in tree order, for the plane picker. */
+export function datumsIn(doc: Document): Feature[] {
+  return doc.features.filter((f) => f.kind === 'datum' && !f.suppressed);
+}
+
+function planeFor(p: Record<string, ParamValue>, fallback: string, doc?: Document): Plane {
+  // A datum named by a feature that comes later, or one that has been deleted, falls back to
+  // the named plane rather than refusing — an older document still builds somewhere sensible
+  // instead of going blank.
+  const named = str(p, 'plane', fallback);
+  if (named === 'datum' && doc) {
+    const want = str(p, 'datumRef', '');
+    const datums = datumsIn(doc);
+
+    // Naming none means the first one, not none at all. Choosing "a datum plane" and then
+    // falling back to Top because the second control had not been touched yet is a feature
+    // that silently does nothing — the user has said where they want it and been ignored.
+    const datum = want
+      ? datums.find((d) => referenceName(d.name) === want || d.name === want)
+      : datums[0];
+
+    if (datum) return datumPlane(datum, doc);
+  }
+
+  const origin = p.planeOrigin;
+  const normal = p.planeNormal;
+
+  if (Array.isArray(origin) && origin.length === 3 && Array.isArray(normal) && normal.length === 3) {
+    const n: Vec3 = [Number(normal[0]), Number(normal[1]), Number(normal[2])];
+    if (n.every(Number.isFinite) && Math.hypot(n[0], n[1], n[2]) > 1e-9) {
+      return planeFrom(
+        [Number(origin[0]), Number(origin[1]), Number(origin[2])],
+        n,
+      );
+    }
+  }
+
+  return planeOf(str(p, 'plane', fallback));
+}
+
+/**
+ * The drill a thread is cut into, for the common coarse metric sizes.
+ *
+ * Nominal minus the pitch, which is the rule every shop uses and which the table below simply
+ * tabulates for the sizes people ask for by name. Anything not listed falls back to the rule
+ * itself rather than to the nominal size, because a hole drilled at the thread diameter cannot
+ * be tapped at all and is a more expensive mistake than one drilled a few tenths off.
+ */
+function tappingDrill(nominal: number): number {
+  const COARSE_PITCH: Record<number, number> = {
+    2: 0.4, 2.5: 0.45, 3: 0.5, 4: 0.7, 5: 0.8, 6: 1, 8: 1.25, 10: 1.5,
+    12: 1.75, 14: 2, 16: 2, 20: 2.5, 24: 3,
+  };
+
+  const pitch = COARSE_PITCH[nominal] ?? nominal * 0.16;
+  return Math.max(0.5, nominal - pitch);
+}
 
 function planeOf(name: string): Plane {
   switch (name) {
@@ -379,13 +699,15 @@ export function applyFeature(current: Mesh, f: Feature, doc: Document): FeatureR
     case 'box': {
       const solid = box(n('length', 60), n('width', 40), n('height', 25),
         [n('x', 0), n('y', 0), n('z', 0)], f.id);
-      return combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
+      return combine(current, place(broken(solid, n('round', 0), f.id), f, doc),
+        str(p, 'operation', 'add'));
     }
 
     case 'cylinder': {
       const solid = cylinder(n('diameter', 40) / 2, n('height', 50),
         [n('x', 0), n('y', 0), n('z', 0)], [0, 0, 1], f.id);
-      return combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
+      return combine(current, place(broken(solid, n('round', 0), f.id), f, doc),
+        str(p, 'operation', 'add'));
     }
 
     case 'sphere': {
@@ -407,32 +729,45 @@ export function applyFeature(current: Mesh, f: Feature, doc: Document): FeatureR
         return { error: `${solved.summary} Remove one of them and the sketch will solve.` };
       }
 
-      const solid = extrude(solved.profile, planeOf(str(p, 'plane', 'XY')), {
+      const solid = extrude(solved.profile, planeFor(p, 'XY', doc), {
         distance: n('distance', 20),
         midplane: p.midplane === true,
         draftDeg: n('draft', 0),
         feature: f.id,
       });
 
-      const combined = combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
-      // Under-constrained is not an error — most sketches are, most of the time — but it is
-      // worth saying, because a dimension that does not hold is a surprise later.
-      return solved.result.degreesOfFreedom > 0
-        ? { ...combined, warning: solved.summary }
-        : combined;
+      /*
+       * Under-constrained is deliberately *not* reported here.
+       *
+       * It is worth knowing — a dimension that does not hold is a surprise later — and the
+       * sketch editor says it, in its own status line, with the tone it deserves. Raising it
+       * as a feature warning as well put it in the application's main notice, where it
+       * replaced the result: draw a rectangle, get a solid, and read "Under-constrained: 8
+       * degrees of freedom left" as the outcome. Every sketch is under-constrained the moment
+       * it is drawn, so that fired every time and taught people that drawing does not work.
+       */
+      return combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
     }
 
     case 'extrude': {
       const profile = profileFrom(p, doc);
       if (!profile) return { error: 'This feature has no profile to extrude.' };
 
-      const solid = extrude(profile, planeOf(str(p, 'plane', 'XY')), {
+      const solid = extrude(profile, planeFor(p, 'XY', doc), {
         distance: n('distance', 20),
         midplane: p.midplane === true,
         draftDeg: n('draft', 0),
         feature: f.id,
       });
-      return combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
+
+      // A relief recovered from a photograph rides on the extrusion rather than replacing it:
+      // the outline still comes from the traced silhouette, and the shading only says how far
+      // the top face stands proud of it. Kept as parameters so the depth stays a number the
+      // user can change — a reconstruction you cannot argue with is not a model.
+      const relief = reliefFor(p, doc);
+      const shaped = relief ? applyRelief(solid, relief, f.id) : solid;
+
+      return combine(current, place(shaped, f, doc), str(p, 'operation', 'add'));
     }
 
     case 'revolve': {
@@ -448,20 +783,419 @@ export function applyFeature(current: Mesh, f: Feature, doc: Document): FeatureR
       return combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
     }
 
+    /*
+     * Loft: a solid through two sections on parallel planes.
+     *
+     * The operation every real CAD package has and this one did not expose, though the kernel
+     * has done it correctly all along. It is what a round-to-square duct transition, a tapered
+     * boss, a blended nacelle and an aerofoil section all are, and without it those parts can
+     * only be approximated by a stack of prisms.
+     *
+     * Two sections rather than an arbitrary stack, because two is what covers the great
+     * majority of real transitions and because a stack needs an editor of its own. Each
+     * section is a full profile in its own right — shape, size and offset — so the sides can
+     * lean as well as taper.
+     */
+    case 'loft': {
+      const bottom = profileFrom(section(p, 'base'), doc);
+      const top = profileFrom(section(p, 'top'), doc);
+      if (!bottom || !top) return { error: 'A loft needs a section at each end.' };
+
+      const height = n('height', 40);
+      if (!(Math.abs(height) > 1e-6)) {
+        return { error: 'A loft with no height between its sections has no volume.' };
+      }
+
+      const plane = planeOf(str(p, 'plane', 'XY'));
+      const solid = loft({
+        sections: [
+          { profile: bottom, plane },
+          { profile: top, plane: { ...plane, origin: add3(plane.origin, mul3(plane.normal, height)) } },
+        ],
+        subdivisions: Math.max(1, Math.round(n('subdivisions', 8))),
+        feature: f.id,
+      });
+      return combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
+    }
+
+    /*
+     * Sweep: a profile driven along a path.
+     *
+     * Also already in the kernel, on rotation-minimising frames, and also unreachable. The
+     * helix path is the reason this matters most: a spring, a worm, a screw thread and an
+     * auger are all one profile on a helix, and none of them can be built from prisms and
+     * revolves at all.
+     */
+    case 'sweep': {
+      const profile = profileFrom(p, doc);
+      if (!profile) return { error: 'This feature has no profile to sweep.' };
+
+      const path = sweepPath(p, doc);
+      if (!path) return { error: 'This sweep has no path to follow.' };
+
+      const solid = sweep(profile, {
+        path,
+        twistDeg: n('twist', 0),
+        endScale: n('endScale', 1),
+        feature: f.id,
+      });
+      return combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
+    }
+
+    /*
+     * Holes, in the forms a drawing actually calls for.
+     *
+     * A plain through hole is the minority of holes on a real part. A cap screw needs a
+     * counterbore so its head sits below the surface, a flat head needs a countersink at the
+     * angle of the head, a screw into a blind boss needs a hole that stops, and a tapped hole
+     * is drilled at the tapping size and not at the thread size. Modelling all of them as one
+     * cylinder of the nominal diameter is wrong in a way that only shows up at assembly.
+     *
+     * Everything is cut from the top face downwards, because that is where a drill enters and
+     * where every depth on a drawing is measured from.
+     */
     case 'hole': {
       if (triCount(current) === 0) return { error: 'There is nothing to drill into yet.' };
 
       const bb = bounds(current);
-      const depth = (bb.max[2] - bb.min[2]) * 3 + 20;
-      const r = n('diameter', 8) / 2;
+      const top = bb.max[2];
+      const span = bb.max[2] - bb.min[2];
+      const kind = str(p, 'holeType', 'through');
+
+      // A tapped hole is drilled at the tapping size, not at the thread size: an M6 tapped
+      // hole is a 5 mm drill. Cutting it at 6 mm leaves no material for the thread to be cut
+      // into, and the part looks right until someone tries to tap it.
+      const nominal = n('diameter', 8);
+      const r = (kind === 'tapped' ? tappingDrill(nominal) : nominal) / 2;
+
+      // Overshoot past the surface so the cut resolves cleanly instead of leaving a film of
+      // coincident faces where the tool ends exactly on the face it is cutting through.
+      const OVER = 1;
 
       const positions = holePositions(p, doc);
-      const drills = positions.map(([x, y]) =>
-        cylinder(r, depth, [x, y, (bb.min[2] + bb.max[2]) / 2], [0, 0, 1], f.id),
-      );
+      const tools: Mesh[] = [];
 
-      const cut = subtractAll(current, drills);
+      for (const [x, y] of positions) {
+        if (kind === 'blind' || kind === 'tapped') {
+          const depth = Math.min(span, Math.max(0.1, n('depth', span / 2)));
+          tools.push(cylinder(r, depth + OVER, [x, y, top + OVER / 2 - depth / 2], [0, 0, 1], f.id));
+        } else {
+          tools.push(cylinder(r, span * 3 + 20, [x, y, (bb.min[2] + bb.max[2]) / 2], [0, 0, 1], f.id));
+        }
+
+        if (kind === 'counterbore') {
+          const cr = Math.max(r + 0.1, n('counterDiameter', nominal * 1.7) / 2);
+          const cd = Math.max(0.1, n('counterDepth', nominal * 0.6));
+          tools.push(cylinder(cr, cd + OVER, [x, y, top + OVER / 2 - cd / 2], [0, 0, 1], f.id));
+        }
+
+        if (kind === 'countersink') {
+          const cr = Math.max(r + 0.1, n('counterDiameter', nominal * 2) / 2);
+          // The depth follows from the head angle and the diameters — it is not a free number,
+          // and offering it as one lets someone draw a countersink no drill could produce.
+          const half = rad(Math.min(179, Math.max(1, n('counterAngle', 90))) / 2);
+          const sink = (cr - r) / Math.tan(half);
+          const lip = OVER * Math.tan(half);
+
+          tools.push(cone(
+            r, cr + lip, sink + OVER,
+            [x, y, top + OVER / 2 - sink / 2], f.id,
+          ));
+        }
+      }
+
+      const cut = subtractAll(current, tools);
       return { mesh: cut.mesh, error: cut.valid ? undefined : cut.diagnostic };
+    }
+
+    /*
+     * A rib: a thin wall standing on the part to stiffen it.
+     *
+     * The commonest feature on any moulded or cast component and one of the cheapest ways to
+     * add stiffness — a wall of a given depth is far stiffer than the same material spread as
+     * extra thickness. Built as a thin box standing on the top face and fused, which is what a
+     * rib is; the alternative of asking the user to draw one as a sketch and extrude it is the
+     * same geometry through four more steps.
+     *
+     * Drafted as it goes, because a rib with parallel sides cannot leave a mould, and the whole
+     * reason a part has ribs rather than thick walls is usually that it is moulded.
+     */
+    case 'rib': {
+      if (triCount(current) === 0) return { error: 'A rib needs something to stand on.' };
+
+      const bb = bounds(current);
+      const thickness = Math.max(0.2, n('thickness', 4));
+      const height = Math.max(0.2, n('height', 20));
+      const length = Math.max(0.2, n('length', (bb.max[0] - bb.min[0]) * 0.8));
+      const draft = n('draft', 1);
+
+      // Standing on the top face and reaching down into the part, so the fusion has real
+      // overlap to work with rather than meeting it exactly at a plane.
+      const base = bb.max[2] - Math.min(height / 2, 2);
+
+      const profile = rectProfile(length, thickness, n('x', 0), n('y', 0), 0);
+      const wall = extrude(profile, { ...XY, origin: [0, 0, base] }, {
+        distance: height,
+        draftDeg: -Math.abs(draft),
+        feature: f.id,
+      });
+
+      return combine(current, place(wall, f, doc), 'add');
+    }
+
+    /*
+     * Draft: taper the walls so the part can leave its mould.
+     *
+     * Every moulded and cast part has it, and its absence is the single most common reason a
+     * design has to go back before tooling. Applied as an intersection with a tapered envelope
+     * of the part's own footprint, which tapers the vertical walls and leaves the top and
+     * bottom faces where they are.
+     *
+     * A positive angle narrows towards the top, which is the direction a part is drawn from a
+     * cavity. Negative narrows downwards, for the other half of the tool.
+     */
+    case 'draft': {
+      if (triCount(current) === 0) return { error: 'There is nothing to draft yet.' };
+
+      const angle = n('angle', 2);
+      if (Math.abs(angle) < 0.01) return { mesh: current };
+
+      const bb = bounds(current);
+      const span = bb.max[2] - bb.min[2];
+      if (!(span > 1e-6)) return { error: 'The part has no height to taper along.' };
+
+      /*
+       * The envelope is lofted between two explicit rectangles rather than extruded with a
+       * draft angle, so both ends are exactly the size intended.
+       *
+       * The first attempt extruded a footprint one and a half times the part's own and let the
+       * draft narrow it. Over a 30 mm block a 3° taper pulls in 1.6 mm a side, against an
+       * envelope 25 mm clear of the part on every side — so the intersection never touched the
+       * walls and draft silently did nothing at all.
+       */
+      const cx = (bb.max[0] + bb.min[0]) / 2;
+      const cy = (bb.max[1] + bb.min[1]) / 2;
+
+      // Just clear of the part at the wide end, so the intersection there does not have to
+      // resolve two coincident walls.
+      const CLEAR = 0.25;
+      const wide = span * Math.tan(rad(Math.abs(angle)));
+
+      const bottomW = (bb.max[0] - bb.min[0]) + CLEAR * 2;
+      const bottomD = (bb.max[1] - bb.min[1]) + CLEAR * 2;
+      const narrow = Math.max(0.5, Math.min(bottomW, bottomD) - wide * 2);
+
+      // A positive angle narrows towards the top, which is the direction a part is drawn from
+      // a cavity. Negative narrows downwards, for the other half of the tool.
+      const topW = angle > 0 ? bottomW - wide * 2 : bottomW;
+      const topD = angle > 0 ? bottomD - wide * 2 : bottomD;
+      const baseW = angle > 0 ? bottomW : bottomW - wide * 2;
+      const baseD = angle > 0 ? bottomD : bottomD - wide * 2;
+
+      if (Math.min(topW, topD, baseW, baseD, narrow) <= 0.5) {
+        return {
+          error: `A ${Math.abs(angle)}° taper over ${span.toFixed(1)} mm would close the part ` +
+            'off entirely. Use a smaller angle.',
+        };
+      }
+
+      const envelope = loft({
+        sections: [
+          { profile: rectProfile(baseW, baseD, cx, cy, 0), plane: { ...XY, origin: [0, 0, bb.min[2] - 0.5] } },
+          { profile: rectProfile(topW, topD, cx, cy, 0), plane: { ...XY, origin: [0, 0, bb.max[2] + 0.5] } },
+        ],
+        subdivisions: 1,
+        feature: f.id,
+      });
+
+      const kept = boolean(current, envelope, 'intersection');
+      return { mesh: kept.mesh, error: kept.valid ? undefined : kept.diagnostic };
+    }
+
+    /*
+     * Dome: bulge a flat face into a curved one.
+     *
+     * The face is refined and pushed out along its own normal by an elliptical profile — full
+     * height at the centre, zero at the edge. Zero at the edge is the part that matters: those
+     * boundary vertices are shared with the walls, so leaving them where they are keeps the
+     * solid closed without any stitching.
+     *
+     * Elliptical over the face's own extent rather than spherical, so a dome on a long
+     * rectangular face follows the rectangle instead of bulging a circle in the middle of it.
+     */
+    case 'dome': {
+      if (triCount(current) === 0) return { error: 'There is nothing to dome yet.' };
+
+      const height = n('height', 10);
+      if (Math.abs(height) < 1e-6) return { mesh: current };
+
+      const up = str(p, 'face', 'top') !== 'bottom';
+      const direction: Vec3 = up ? [0, 0, 1] : [0, 0, -1];
+
+      /*
+       * How much to refine, bounded by what the solid already costs.
+       *
+       * Subdivision splits *every* triangle — it has to, or the mesh develops T-junctions and
+       * stops being closed. So the price is set by the whole part, not by the face being
+       * domed, and asking for a fixed four levels regardless took a tessellated sphere from
+       * 3 800 triangles to 242 000 to raise a bump worth a third of a percent of its volume.
+       *
+       * The budget is a ceiling on the finished mesh rather than a fixed number of levels: a
+       * box has twelve triangles and can afford to be refined a great deal, and something
+       * already dense cannot afford much at all. Where the budget allows nothing, the existing
+       * vertices are displaced as they are — coarse, but a valid solid, and honest about it.
+       */
+      const BUDGET = 60_000;
+      const affordable = Math.floor(Math.log(BUDGET / Math.max(1, triCount(current))) / Math.log(4));
+      const asked = Math.round(n('smoothness', 4));
+      const levels = Math.max(0, Math.min(5, asked, affordable));
+
+      const fine = levels > 0 ? subdivide(current, levels) : current;
+      const faces = facesFacing(fine, direction, 10);
+      if (faces.size === 0) {
+        return {
+          error: `No flat face points ${up ? 'up' : 'down'}, so there is nothing to dome. `
+            + 'A dome needs somewhere flat to grow out of.',
+        };
+      }
+
+      // The extent of the faces being domed, so the profile spans exactly them.
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (let t = 0; t < triCount(fine); t++) {
+        if (!faces.has(fine.faceIds[t]!)) continue;
+        for (const v of getTriangle(fine, t)) {
+          minX = Math.min(minX, v[0]); maxX = Math.max(maxX, v[0]);
+          minY = Math.min(minY, v[1]); maxY = Math.max(maxY, v[1]);
+        }
+      }
+
+      const halfX = Math.max(1e-6, (maxX - minX) / 2);
+      const halfY = Math.max(1e-6, (maxY - minY) / 2);
+      const cx = (maxX + minX) / 2;
+      const cy = (maxY + minY) / 2;
+
+      const domed = displaceFaces(fine, faces, direction, (point) => {
+        const u = (point[0] - cx) / halfX;
+        const v = (point[1] - cy) / halfY;
+        const r2 = u * u + v * v;
+        return r2 >= 1 ? 0 : Math.abs(height) * Math.sqrt(1 - r2);
+      });
+
+      return { mesh: domed };
+    }
+
+    /*
+     * Split: cut the solid into two bodies with a plane.
+     *
+     * Both halves are kept rather than one being thrown away, because that is what the
+     * operation is for — a moulded housing separated into its two shells, a casting parted at
+     * its parting line. They come back as distinct bodies, so each gets its own colour and its
+     * own line in the bill of materials.
+     */
+    case 'split': {
+      if (triCount(current) === 0) return { error: 'There is nothing to split yet.' };
+
+      const bb = bounds(current);
+      const axis = str(p, 'plane', 'YZ');
+      const index = axis === 'XY' ? 2 : axis === 'XZ' ? 1 : 0;
+
+      const lo = bb.min[index]!;
+      const hi = bb.max[index]!;
+      const at = lo + (hi - lo) * Math.min(0.99, Math.max(0.01, n('at', 0.5)));
+
+      // A cutter big enough to cover the part in the two directions it does not divide.
+      const pad = Math.max(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], hi - lo) + 20;
+      const size: Vec3 = [pad, pad, pad];
+      const centre: Vec3 = [
+        (bb.max[0] + bb.min[0]) / 2, (bb.max[1] + bb.min[1]) / 2, (bb.max[2] + bb.min[2]) / 2,
+      ];
+
+      size[index] = (at - lo) + 10;
+      centre[index] = at - size[index] / 2;
+
+      const cutter = box(size[0], size[1], size[2], centre, f.id);
+
+      const keep = str(p, 'keep', 'both');
+      const near = boolean(current, cutter, 'intersection');
+      const far = boolean(current, cutter, 'difference');
+
+      if (!near.valid || !far.valid) {
+        return { mesh: current, error: near.diagnostic ?? far.diagnostic };
+      }
+
+      if (keep === 'first') return { mesh: near.mesh };
+      if (keep === 'second') return { mesh: far.mesh };
+      return { mesh: concatMeshes([near.mesh, far.mesh]) };
+    }
+
+    /*
+     * Datum: a reference plane, and nothing else.
+     *
+     * It builds no geometry. It exists so a sketch or an extrude can be placed somewhere other
+     * than Top, Front or Right. Sketching on a model face already covers the common case; this
+     * covers the one it cannot, which is a plane offset from or tilted relative to anything
+     * that exists yet.
+     */
+    case 'datum':
+      return { mesh: current };
+
+    /*
+     * Wrap: a band of features rolled around the part, embossed or engraved.
+     *
+     * What people reach for wrap to do on a round part is knurling, a gripping pattern, a
+     * retaining groove, or a ring of slots or flats — all of them the same shape repeated
+     * around an axis at a constant radius. That is what this builds.
+     *
+     * It is not the general operation. Wrapping arbitrary *text* onto a cone, or a sketch onto
+     * a doubly-curved surface, needs a surface parameterisation this kernel does not carry, and
+     * the honest thing is to build the case that covers most of the use rather than to
+     * approximate the rest badly. The limitation is in the manual.
+     *
+     * Each tooth is placed by rotating one cutter about Z, so the pattern is exactly regular
+     * and the count is exactly what was asked for.
+     */
+    case 'wrap': {
+      if (triCount(current) === 0) return { error: 'There is nothing to wrap around yet.' };
+
+      const bb = bounds(current);
+      const count = Math.max(1, Math.min(240, Math.round(n('count', 24))));
+      const depth = Math.max(0.05, n('depth', 1.5));
+      const height = Math.max(0.1, n('height', (bb.max[2] - bb.min[2]) * 0.6));
+      const teethWidth = Math.max(0.05, n('width', 2));
+      const z = n('z', (bb.max[2] + bb.min[2]) / 2);
+
+      // The radius the band sits at: taken from the part unless it was given, so the common
+      // case needs no measuring.
+      const measured = Math.max(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1]) / 2;
+      const radius = n('radius', measured);
+      if (!(radius > 0)) return { error: 'The wrap radius has to be greater than zero.' };
+
+      const engrave = str(p, 'operation', 'cut') !== 'add';
+
+      // One tooth, standing at the radius on the +X side, then turned into place.
+      const tools: Mesh[] = [];
+      for (let i = 0; i < count; i++) {
+        const angle = (i / count) * Math.PI * 2;
+
+        // Straddling the surface, so an engraved tooth bites in and an embossed one lands on
+        // it rather than floating a hair away.
+        const centre: Vec3 = [radius, 0, z];
+        const tooth = box(depth * 2, teethWidth, height, centre, f.id);
+        tools.push(transformMesh(tooth, rotation([0, 0, 1], angle)));
+      }
+
+      if (engrave) {
+        const cut = subtractAll(current, tools);
+        return { mesh: cut.mesh, error: cut.valid ? undefined : cut.diagnostic };
+      }
+
+      let out = current;
+      for (const tool of tools) {
+        const fused = boolean(out, tool, 'union');
+        if (!fused.valid) return { mesh: out, error: fused.diagnostic };
+        out = fused.mesh;
+      }
+      return { mesh: out };
     }
 
     case 'pocket': {
@@ -623,19 +1357,30 @@ export function placementProblems(feature: Feature, doc: Document): string[] {
   return out;
 }
 
+// A mirror is never identity, however zero the rest of the placement is.
 const isIdentity = (p: Placement) =>
-  p.x === 0 && p.y === 0 && p.z === 0 && p.rx === 0 && p.ry === 0 && p.rz === 0;
+  !p.mirror && p.x === 0 && p.y === 0 && p.z === 0 && p.rx === 0 && p.ry === 0 && p.rz === 0;
 
 /** The transform a placement applies: rotate about Z, then Y, then X, then translate. */
 export function placementMatrix(p: Placement): Mat4 {
-  return matMul(
-    translation([p.x, p.y, p.z]),
-    matMul(
-      rotation([0, 0, 1], rad(p.rz)),
-      matMul(rotation([0, 1, 0], rad(p.ry)), rotation([1, 0, 0], rad(p.rx))),
-    ),
+  const rotate = matMul(
+    rotation([0, 0, 1], rad(p.rz)),
+    matMul(rotation([0, 1, 0], rad(p.ry)), rotation([1, 0, 0], rad(p.rx))),
   );
+
+  // Innermost, so the body is reflected in its own frame and then oriented and moved. Applied
+  // after the rotation it would reflect the placed body about a world plane instead, which
+  // moves the part as well as flipping it.
+  const oriented = p.mirror
+    ? matMul(rotate, reflection([0, 0, 0], MIRROR_NORMAL[p.mirror]))
+    : rotate;
+
+  return matMul(translation([p.x, p.y, p.z]), oriented);
 }
+
+const MIRROR_NORMAL: Record<'x' | 'y' | 'z', Vec3> = {
+  x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1],
+};
 
 /**
  * Takes a mesh from world coordinates back into a feature's own.
@@ -649,14 +1394,18 @@ export function unplaceMesh(solid: Mesh, feature: Feature, doc: Document): Mesh 
   const p = resolvedPlacement(feature, doc);
   if (!p || isIdentity(p)) return solid;
 
-  const inverse = matMul(
-    matMul(
-      matMul(rotation([1, 0, 0], rad(-p.rx)), rotation([0, 1, 0], rad(-p.ry))),
-      rotation([0, 0, 1], rad(-p.rz)),
-    ),
-    translation([-p.x, -p.y, -p.z]),
+  const unrotate = matMul(
+    matMul(rotation([1, 0, 0], rad(-p.rx)), rotation([0, 1, 0], rad(-p.ry))),
+    rotation([0, 0, 1], rad(-p.rz)),
   );
-  return transformMesh(solid, inverse);
+
+  // A reflection is its own inverse, so undoing it is the same matrix — but it has to come
+  // last here, mirroring the fact that it came first going the other way.
+  const unoriented = p.mirror
+    ? matMul(reflection([0, 0, 0], MIRROR_NORMAL[p.mirror]), unrotate)
+    : unrotate;
+
+  return transformMesh(solid, matMul(unoriented, translation([-p.x, -p.y, -p.z])));
 }
 
 /** Applies a feature's placement to a mesh, resolving any driven axes. */
@@ -729,6 +1478,73 @@ function pairs(flat: number[]): Vec2[] {
   const out: Vec2[] = [];
   for (let i = 0; i + 1 < flat.length; i += 2) out.push([flat[i], flat[i + 1]]);
   return out;
+}
+
+/**
+ * One end of a loft, read out of the feature's own parameters.
+ *
+ * `baseShape`/`baseDiameter`/… are rewritten to `shape`/`diameter`/… so both ends go through
+ * exactly the same profile builder as every other feature. Two parallel profile readers that
+ * drift apart is how a circle ends up meaning one thing at the bottom of a loft and another
+ * at the top.
+ */
+function section(p: Record<string, ParamValue>, prefix: string): Record<string, ParamValue> {
+  const out: Record<string, ParamValue> = {};
+  for (const [key, value] of Object.entries(p)) {
+    if (!key.startsWith(prefix) || key.length === prefix.length) continue;
+    out[key[prefix.length]!.toLowerCase() + key.slice(prefix.length + 1)] = value;
+  }
+  return out;
+}
+
+/**
+ * The curve a sweep follows.
+ *
+ * A helix is interpolated rather than expressed exactly, because a helix is not a rational
+ * curve and no NURBS of any degree is one. Sampling it densely and interpolating is the
+ * standard construction; the error is bounded by the sample spacing, which is why the number
+ * of samples is tied to the number of turns rather than fixed.
+ */
+function sweepPath(p: Record<string, ParamValue>, doc: Document): NurbsCurve | null {
+  const n = (key: string, fallback: number) => num(doc, p, key, fallback);
+  const kind = str(p, 'path', 'line');
+
+  if (kind === 'helix') {
+    const radius = n('pathRadius', 30);
+    const turns = n('turns', 4);
+    const pitch = n('pitch', 12);
+    if (!(radius > 0) || !(Math.abs(turns) > 1e-6)) return null;
+
+    const perTurn = 48;
+    const count = Math.max(8, Math.min(4000, Math.round(Math.abs(turns) * perTurn)));
+    const pts: Vec3[] = [];
+    for (let i = 0; i <= count; i++) {
+      const t = (i / count) * turns * 2 * Math.PI;
+      pts.push([radius * Math.cos(t), radius * Math.sin(t), (t / (2 * Math.PI)) * pitch]);
+    }
+    return interpolateCurve(pts, 3);
+  }
+
+  if (kind === 'arc') {
+    const radius = n('pathRadius', 60);
+    const sweepDeg = n('pathAngle', 90);
+    if (!(radius > 0) || !(Math.abs(sweepDeg) > 1e-6)) return null;
+
+    // Interpolated, not `arcToNurbs`, so the path starts at the origin pointing along +Z —
+    // the same place and direction a straight path starts. A sweep whose path jumps somewhere
+    // else the moment you change its shape is not an editable feature.
+    const count = Math.max(8, Math.round(Math.abs(sweepDeg) / 3));
+    const pts: Vec3[] = [];
+    for (let i = 0; i <= count; i++) {
+      const a = rad((sweepDeg * i) / count);
+      pts.push([radius * (1 - Math.cos(a)), 0, radius * Math.sin(a)]);
+    }
+    return interpolateCurve(pts, 3);
+  }
+
+  const distance = n('distance', 80);
+  if (!(Math.abs(distance) > 1e-6)) return null;
+  return lineToNurbs([0, 0, 0], [0, 0, distance]);
 }
 
 function profileFrom(p: Record<string, ParamValue>, doc: Document): Profile | null {
@@ -943,7 +1759,9 @@ const KIND_LABEL: Record<FeatureKind, string> = {
   archetype: 'Shape',
   box: 'Box', cylinder: 'Cylinder', sphere: 'Sphere',
   sketch: 'Sketch',
-  extrude: 'Extrude', revolve: 'Revolve',
+  extrude: 'Extrude', revolve: 'Revolve', loft: 'Loft', sweep: 'Sweep',
+  rib: 'Rib', draft: 'Draft', dome: 'Dome', split: 'Split', datum: 'Datum',
+  wrap: 'Wrap',
   hole: 'Hole', pocket: 'Pocket', slot: 'Slot',
   fillet: 'Fillet', chamfer: 'Chamfer', shell: 'Shell',
   patternLinear: 'LinearPattern', patternCircular: 'CircularPattern', mirror: 'Mirror',
@@ -978,7 +1796,9 @@ export interface ParamField {
  * thickness or a 400-instance pattern will produce something the kernel refuses to build,
  * and it is better to stop it at the slider than to explain the failure afterwards.
  */
-export function paramFields(kind: FeatureKind, params?: Record<string, ParamValue>): ParamField[] {
+export function paramFields(
+  kind: FeatureKind, params?: Record<string, ParamValue>, doc?: Document,
+): ParamField[] {
   const N = (key: string, label: string, min: number, max: number, step = 0.5, unit = 'mm'): ParamField =>
     ({ key, label, unit, min, max, step, kind: 'number' });
 
@@ -991,29 +1811,42 @@ export function paramFields(kind: FeatureKind, params?: Record<string, ParamValu
     ],
   };
 
+  // The three standard planes, plus whatever datums the document actually has. Offered rather
+  // than typed, because a reference nobody can see the vocabulary of is one nobody uses.
+  const datums = doc ? datumsIn(doc) : [];
   const PLANE: ParamField = {
     key: 'plane', label: 'Plane', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
     choices: [
       { value: 'XY', label: 'Top (XY)' },
       { value: 'XZ', label: 'Front (XZ)' },
       { value: 'YZ', label: 'Right (YZ)' },
+      ...(datums.length > 0 ? [{ value: 'datum', label: 'A datum plane' }] : []),
     ],
   };
+
+  const DATUM_REF: ParamField[] = datums.length > 0 && params && str(params, 'plane', '') === 'datum'
+    ? [{
+        key: 'datumRef', label: 'Which datum', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+        choices: datums.map((d) => ({ value: referenceName(d.name), label: d.name })),
+      }]
+    : [];
 
   switch (kind) {
     case 'box':
       return [N('length', 'Length', 1, 2000), N('width', 'Width', 1, 2000), N('height', 'Height', 1, 2000),
-        N('x', 'Centre X', -1000, 1000), N('y', 'Centre Y', -1000, 1000), OPERATION];
+        N('x', 'Centre X', -1000, 1000), N('y', 'Centre Y', -1000, 1000),
+        N('round', 'Edge break', 0, 200, 0.25), OPERATION];
     case 'cylinder':
       return [N('diameter', 'Diameter', 1, 2000), N('height', 'Height', 1, 2000),
-        N('x', 'Centre X', -1000, 1000), N('y', 'Centre Y', -1000, 1000), OPERATION];
+        N('x', 'Centre X', -1000, 1000), N('y', 'Centre Y', -1000, 1000),
+        N('round', 'Edge break', 0, 200, 0.25), OPERATION];
     case 'sphere':
       return [N('diameter', 'Diameter', 1, 2000), N('x', 'Centre X', -1000, 1000),
         N('y', 'Centre Y', -1000, 1000), N('z', 'Centre Z', -1000, 1000), OPERATION];
     case 'sketch':
       // No Length or Width: a sketch's size comes from its constraints, and offering a box to
       // type into beside them would be two competing ways to say the same thing.
-      return [PLANE, N('distance', 'Thickness', 0.1, 2000),
+      return [PLANE, ...DATUM_REF, N('distance', 'Thickness', 0.1, 2000),
         N('draft', 'Draft', -20, 20, 0.5, 'deg'), OPERATION];
 
     case 'extrude':
@@ -1024,20 +1857,175 @@ export function paramFields(kind: FeatureKind, params?: Record<string, ParamValu
         return [N('width', 'Overall width', 1, 5000, 0.5), N('distance', 'Thickness', 0.1, 2000),
           N('draft', 'Draft', -20, 20, 0.5, 'deg'), OPERATION];
       }
-      return [PLANE, N('length', 'Length', 1, 2000), N('width', 'Width', 1, 2000),
+      return [PLANE, ...DATUM_REF, N('length', 'Length', 1, 2000), N('width', 'Width', 1, 2000),
         N('cornerRadius', 'Corner radius', 0, 200), N('distance', 'Distance', 0.1, 2000),
         N('draft', 'Draft', -20, 20, 0.5, 'deg'), OPERATION];
     case 'revolve':
       return [PLANE, N('length', 'Section length', 1, 500), N('width', 'Section width', 1, 500),
         N('x', 'Offset from axis', 0, 1000), N('angle', 'Angle', 1, 360, 1, 'deg'), OPERATION];
-    case 'hole':
+    case 'loft': {
+      // Each end shows only the dimensions its own shape uses. A circle has no width, and
+      // offering one is an edit that silently does nothing — the same defect the traced
+      // extrude had.
+      const ends = (prefix: string, label: string): ParamField[] => {
+        const shape = params ? str(params, `${prefix}Shape`, 'rect') : 'rect';
+        const choice: ParamField = {
+          key: `${prefix}Shape`, label: `${label} shape`, unit: '', min: 0, max: 0, step: 0,
+          kind: 'choice',
+          choices: [
+            { value: 'rect', label: 'Rectangle' },
+            { value: 'circle', label: 'Circle' },
+            { value: 'polygon', label: 'Polygon' },
+          ],
+        };
+        const size = shape === 'circle'
+          ? [N(`${prefix}Diameter`, `${label} diameter`, 0.5, 2000)]
+          : shape === 'polygon'
+            ? [N(`${prefix}Diameter`, `${label} across corners`, 0.5, 2000),
+               N(`${prefix}Sides`, `${label} sides`, 3, 24, 1, '')]
+            : [N(`${prefix}Length`, `${label} length`, 0.5, 2000),
+               N(`${prefix}Width`, `${label} width`, 0.5, 2000)];
+
+        return [choice, ...size,
+          N(`${prefix}X`, `${label} offset X`, -1000, 1000),
+          N(`${prefix}Y`, `${label} offset Y`, -1000, 1000)];
+      };
+
+      return [PLANE, N('height', 'Height', 0.1, 2000),
+        ...ends('base', 'Bottom'), ...ends('top', 'Top'),
+        N('subdivisions', 'Smoothness', 1, 64, 1, ''), OPERATION];
+    }
+
+    case 'sweep': {
+      const path = params ? str(params, 'path', 'line') : 'line';
+      const PATH: ParamField = {
+        key: 'path', label: 'Path', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+        choices: [
+          { value: 'line', label: 'Straight' },
+          { value: 'arc', label: 'Arc' },
+          { value: 'helix', label: 'Helix' },
+        ],
+      };
+      const SHAPE: ParamField = {
+        key: 'shape', label: 'Section', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+        choices: [
+          { value: 'circle', label: 'Circle' },
+          { value: 'rect', label: 'Rectangle' },
+          { value: 'polygon', label: 'Polygon' },
+        ],
+      };
+      const shape = params ? str(params, 'shape', 'circle') : 'circle';
+      const size = shape === 'rect'
+        ? [N('length', 'Section length', 0.2, 1000), N('width', 'Section width', 0.2, 1000)]
+        : shape === 'polygon'
+          ? [N('diameter', 'Across corners', 0.2, 1000), N('sides', 'Sides', 3, 24, 1, '')]
+          : [N('diameter', 'Section diameter', 0.2, 1000)];
+
+      const along = path === 'helix'
+        ? [N('pathRadius', 'Coil radius', 0.5, 2000), N('turns', 'Turns', 0.25, 200, 0.25, ''),
+           N('pitch', 'Pitch', 0.2, 500)]
+        : path === 'arc'
+          ? [N('pathRadius', 'Bend radius', 0.5, 5000), N('pathAngle', 'Bend angle', 1, 350, 1, 'deg')]
+          : [N('distance', 'Length', 0.5, 5000)];
+
+      return [SHAPE, ...size, PATH, ...along,
+        N('twist', 'Twist', -1080, 1080, 5, 'deg'),
+        N('endScale', 'End scale', 0.05, 20, 0.05, ''), OPERATION];
+    }
+
+    case 'wrap':
       return [
+        N('count', 'How many', 1, 240, 1, ''),
+        N('width', 'Feature width', 0.05, 200),
+        N('depth', 'Depth', 0.05, 200),
+        N('height', 'Band height', 0.1, 2000),
+        N('z', 'Band centre Z', -2000, 2000),
+        N('radius', 'Radius', 0.1, 2000),
+        { key: 'operation', label: 'Cut or raise', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+          choices: [
+            { value: 'cut', label: 'Engrave into the surface' },
+            { value: 'add', label: 'Emboss onto the surface' },
+          ] },
+      ];
+    case 'dome':
+      return [
+        { key: 'face', label: 'Face', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+          choices: [{ value: 'top', label: 'Top' }, { value: 'bottom', label: 'Bottom' }] },
+        N('height', 'Height', 0.1, 1000),
+        N('smoothness', 'Smoothness', 1, 5, 1, ''),
+      ];
+    case 'split':
+      return [
+        { key: 'plane', label: 'Cut along', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+          choices: [
+            { value: 'YZ', label: 'X (left / right)' },
+            { value: 'XZ', label: 'Y (front / back)' },
+            { value: 'XY', label: 'Z (top / bottom)' },
+          ] },
+        N('at', 'Position', 0.01, 0.99, 0.01, ''),
+        { key: 'keep', label: 'Keep', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+          choices: [
+            { value: 'both', label: 'Both halves' },
+            { value: 'first', label: 'The near half only' },
+            { value: 'second', label: 'The far half only' },
+          ] },
+      ];
+    case 'datum':
+      return [
+        { key: 'basePlane', label: 'Parallel to', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+          choices: [
+            { value: 'XY', label: 'Top (XY)' },
+            { value: 'XZ', label: 'Front (XZ)' },
+            { value: 'YZ', label: 'Right (YZ)' },
+          ] },
+        N('offset', 'Offset', -2000, 2000),
+        N('tiltX', 'Tilt about X', -89, 89, 1, 'deg'),
+        N('tiltY', 'Tilt about Y', -89, 89, 1, 'deg'),
+      ];
+    case 'rib':
+      return [N('length', 'Length', 1, 2000), N('thickness', 'Thickness', 0.2, 200),
+        N('height', 'Height', 0.5, 1000), N('x', 'Centre X', -1000, 1000),
+        N('y', 'Centre Y', -1000, 1000), N('draft', 'Draft', 0, 15, 0.5, 'deg')];
+    case 'draft':
+      return [N('angle', 'Angle', -20, 20, 0.5, 'deg')];
+    case 'hole': {
+      const holeType = params ? str(params, 'holeType', 'through') : 'through';
+      const TYPE: ParamField = {
+        key: 'holeType', label: 'Type', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+        choices: [
+          { value: 'through', label: 'Through' },
+          { value: 'blind', label: 'Blind' },
+          { value: 'counterbore', label: 'Counterbore' },
+          { value: 'countersink', label: 'Countersink' },
+          { value: 'tapped', label: 'Tapped' },
+        ],
+      };
+
+      // Only the dimensions this kind of hole uses. A countersink has no depth of its own —
+      // it follows from the head angle and the two diameters — and offering one would let
+      // someone draw a countersink no drill could cut.
+      const forType =
+        holeType === 'counterbore'
+          ? [N('counterDiameter', 'Counterbore diameter', 1, 300),
+             N('counterDepth', 'Counterbore depth', 0.1, 200)]
+          : holeType === 'countersink'
+            ? [N('counterDiameter', 'Countersink diameter', 1, 300),
+               N('counterAngle', 'Head angle', 60, 130, 1, 'deg')]
+            : holeType === 'blind' || holeType === 'tapped'
+              ? [N('depth', 'Depth', 0.5, 500)]
+              : [];
+
+      return [
+        TYPE,
+        N('diameter', holeType === 'tapped' ? 'Thread size' : 'Diameter', 0.5, 300),
+        ...forType,
         { key: 'pattern', label: 'Pattern', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
           choices: [{ value: 'single', label: 'Single' }, { value: 'boltCircle', label: 'Bolt circle' }, { value: 'grid', label: 'Grid' }] },
-        N('diameter', 'Diameter', 0.5, 300), N('x', 'X', -1000, 1000), N('y', 'Y', -1000, 1000),
+        N('x', 'X', -1000, 1000), N('y', 'Y', -1000, 1000),
         N('boltCircle', 'Bolt circle diameter', 1, 2000), N('count', 'Count', 1, 48, 1, ''),
         N('cols', 'Columns', 1, 20, 1, ''), N('rows', 'Rows', 1, 20, 1, ''),
         N('spacingX', 'Spacing X', 1, 500), N('spacingY', 'Spacing Y', 1, 500)];
+    }
     case 'pocket':
       return [N('length', 'Length', 1, 1000), N('width', 'Width', 1, 1000), N('depth', 'Depth', 0.1, 500),
         N('cornerRadius', 'Corner radius', 0, 200), N('x', 'Centre X', -1000, 1000), N('y', 'Centre Y', -1000, 1000)];
@@ -1089,13 +2077,52 @@ export function paramFields(kind: FeatureKind, params?: Record<string, ParamValu
 /** Sensible starting parameters, so a newly added feature is immediately visible. */
 export function defaultParams(kind: FeatureKind): Record<string, ParamValue> {
   switch (kind) {
-    case 'box': return { length: 60, width: 40, height: 25, x: 0, y: 0, operation: 'add' };
-    case 'cylinder': return { diameter: 40, height: 50, x: 0, y: 0, operation: 'add' };
+    // A 1 mm break by default, because that is what a part comes off a machine with. It is
+    // small enough not to change any dimension anyone typed and large enough to catch a
+    // highlight, which is what makes a solid read as a made object rather than a diagram.
+    /*
+     * Edge break off by default.
+     *
+     * It was on, at 1 mm, so that a massing model would not read as a stack of blocks. The
+     * cost was not worth it and was not visible from here: breaking the edges of a box turns
+     * six flat faces into thirty-four — six faces, twelve edge blends and eight corner patches
+     * — and every one of them is separately pickable, so choosing a face to work on became a
+     * hunt. Worse, it left no edge longer than the break itself, and Fillet and Chamfer both
+     * refuse a radius wider than half the edge it runs along. The two most basic modelling
+     * operations after extrude were dead on the commonest solid in the application, and said
+     * so with a message about a 1.57 mm edge nobody had drawn.
+     *
+     * A box is a box. Rounding is a feature you add, deliberately, and now one that works.
+     * The parameter stays, for a part that wants a finish rather than further modelling.
+     */
+    case 'box': return { length: 60, width: 40, height: 25, x: 0, y: 0, round: 0, operation: 'add' };
+    case 'cylinder': return { diameter: 40, height: 50, x: 0, y: 0, round: 0, operation: 'add' };
     case 'sphere': return { diameter: 50, x: 0, y: 0, z: 0, operation: 'add' };
     case 'sketch': return { plane: 'XY', sketch: '', distance: 20, draft: 0, operation: 'add' };
     case 'extrude': return { plane: 'XY', shape: 'rect', length: 60, width: 40, cornerRadius: 0, distance: 20, draft: 0, operation: 'add' };
     case 'revolve': return { plane: 'XZ', shape: 'rect', length: 20, width: 40, x: 30, angle: 360, operation: 'add' };
-    case 'hole': return { pattern: 'single', diameter: 8, x: 0, y: 0, boltCircle: 80, count: 6, cols: 2, rows: 2, spacingX: 40, spacingY: 40 };
+    // A 60 mm square up to a 40 mm circle: a round-to-square transition, which is the shape
+    // that makes it obvious at a glance what a loft is for.
+    case 'loft': return {
+      plane: 'XY', height: 60, subdivisions: 8, operation: 'add',
+      baseShape: 'rect', baseLength: 60, baseWidth: 60, baseX: 0, baseY: 0,
+      topShape: 'circle', topDiameter: 40, topX: 0, topY: 0,
+    };
+    // A helical spring: 6 mm wire, 30 mm coil radius, four turns. Chosen over a straight
+    // sweep as the default because a straight sweep of a circle is a cylinder, and a default
+    // that looks like something you could already build teaches nothing.
+    case 'sweep': return {
+      shape: 'circle', diameter: 6, path: 'helix',
+      pathRadius: 30, turns: 4, pitch: 12, distance: 80, pathAngle: 90,
+      twist: 0, endScale: 1, operation: 'add',
+    };
+    case 'dome': return { height: 10, face: 'top', smoothness: 4 };
+    case 'wrap': return { count: 24, depth: 1.5, width: 2, height: 20, z: 0, operation: 'cut' };
+    case 'split': return { plane: 'YZ', at: 0.5, keep: 'both' };
+    case 'datum': return { basePlane: 'XY', offset: 20, tiltX: 0, tiltY: 0 };
+    case 'rib': return { thickness: 4, height: 20, length: 60, x: 0, y: 0, draft: 1 };
+    case 'draft': return { angle: 2 };
+    case 'hole': return { holeType: 'through', pattern: 'single', diameter: 8, x: 0, y: 0, boltCircle: 80, count: 6, cols: 2, rows: 2, spacingX: 40, spacingY: 40 };
     case 'pocket': return { length: 30, width: 20, depth: 5, cornerRadius: 2, x: 0, y: 0 };
     case 'slot': return { length: 30, width: 8, x: 0, y: 0, angle: 0 };
     case 'fillet': return { radius: 3, minAngle: 30, faceMatch: 'bounding', convexity: 'all', faces: [] };

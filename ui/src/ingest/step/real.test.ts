@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { readStep } from './read';
 import { fitArchetype } from '../fit/archetype';
+import { fitPrismatic } from '../fit/prismatic';
 import { bounds, massProperties } from '../../kernel/topo/mesh';
 
 /**
@@ -78,16 +79,23 @@ describe('reading a real SOLIDWORKS export', () => {
     }
   });
 
-  it('closes three of the four, and reports the fourth rather than hiding it', () => {
-    // 423-0292 comes back non-manifold. It is the honest outcome to record: the shape and
-    // size are right, the solid is not sound, and the result says so instead of presenting
-    // a volume that cannot be trusted.
-    const closed = cases.map(([n]) => read(n)).filter((r) => r.closed);
-    expect(closed).toHaveLength(3);
+  it('closes all four, once a multi-body part is read as several bodies', () => {
+    // 423-0292 is two solids — "Mirror1" and "Convert-Solid2". Merging them into one mesh put
+    // four triangles on every shared edge and reported a perfectly sound part as non-manifold,
+    // which is a fact about the merge rather than about the part.
+    for (const [name] of cases) {
+      const result = read(name);
+      expect(result.closed, name).toBe(true);
+      expect(result.bodies.every((b) => b.closed), name).toBe(true);
+    }
+  });
 
-    const open = read('423-0292.STEP');
-    expect(open.closed).toBe(false);
-    expect(open.notes.join(' ')).toMatch(/not closed/);
+  it('reads a multi-body part as its separate bodies, named', () => {
+    const result = read('423-0292.STEP');
+
+    expect(result.bodies).toHaveLength(2);
+    expect(result.bodies.map((b) => b.name).sort()).toEqual(['Convert-Solid2', 'Mirror1']);
+    expect(result.notes.join(' ')).toMatch(/2 separate bodies/);
   });
 
   it('weighs grams, not milligrams — the check a unit error cannot pass', () => {
@@ -100,13 +108,14 @@ describe('reading a real SOLIDWORKS export', () => {
     }
   });
 
-  it('recognises none of them, which is the true hit rate for this library', () => {
-    // Not a failure — a measurement. These are machined clips and bases: prismatic profiles
-    // with holes, not boxes, cylinders, washers, nuts, pipes or shafts. The fitter refusing
-    // them is it working. It also means none of this library can be *taught* until the
-    // vocabulary grows to include an extruded profile, which is the next piece of work.
-    for (const [name] of cases) {
-      expect(fitArchetype(read(name).mesh).best, name).toBeNull();
-    }
+  it('recognises three of the four as editable profiles', () => {
+    // Not a catalogue shape between them — these are machined clips and bases — so they are
+    // read as profiles instead. The fourth is two bodies, and neither is a single stack.
+    const recovered = cases
+      .map(([name]) => fitPrismatic(read(name).mesh).best !== null)
+      .filter(Boolean);
+
+    expect(recovered).toHaveLength(3);
+    for (const [name] of cases) expect(fitArchetype(read(name).mesh).best, name).toBeNull();
   });
 });

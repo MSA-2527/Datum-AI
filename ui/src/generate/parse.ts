@@ -60,13 +60,13 @@ const NUMBER_WORDS: Record<string, number> = {
  * specified — "1/4 inch plate", not "6.35 mm plate" — and silently mis-reading 1/4 as 1
  * would produce a part four times too thick.
  */
-interface Measure {
+export interface Measure {
   mm: number;
   raw: string;
   index: number;
 }
 
-function findMeasures(text: string): Measure[] {
+export function findMeasures(text: string): Measure[] {
   const out: Measure[] = [];
   const unitAlt = Object.keys(UNIT_TO_MM)
     .filter((u) => /^[a-z]+$/.test(u))

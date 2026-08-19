@@ -1,0 +1,37 @@
+# DATUM - Requirements & Setup
+
+## Prerequisites (one-time install)
+
+- Node.js 18+ from https://nodejs.org/
+- .NET 8.0+ SDK from https://dotnet.microsoft.com/download
+
+## Quick Start - Run One Command
+
+**Windows:**
+```powershell
+.\setup.ps1
+```
+
+**macOS/Linux:**
+```bash
+./setup.sh
+```
+
+This installs everything and starts the dev server at http://localhost:5273
+
+## Manual Setup
+
+If you prefer to run commands yourself:
+
+```bash
+npm --prefix ui install
+npm --prefix ui run dev
+```
+
+## Commands
+
+- `npm --prefix ui run dev` - Start development server
+- `npm --prefix ui run build` - Build for production (output in `ui/dist/`)
+- `npm --prefix ui run test` - Run UI tests
+- `dotnet build` - Build backend services
+- `dotnet test` - Run backend tests

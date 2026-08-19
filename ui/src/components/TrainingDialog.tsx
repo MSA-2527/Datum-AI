@@ -4,6 +4,8 @@ import { buildSystemPrompt } from '../ai/decompose';
 import { exemplarsFor, fromFile, toJsonl, type Example } from '../lib/training';
 import { type FileResult } from '../lib/bulk';
 import { download } from '../lib/exporters';
+import { currentSizeModel } from '../ml/corpus';
+import { describeModel, predictSize } from '../ml/dimensions';
 
 /**
  * Teaching the planner from your own parts.
@@ -19,6 +21,43 @@ import { download } from '../lib/exporters';
  * half an example; the sentence someone would actually type is the half a model has to learn
  * to recognise, and it cannot be recovered from the part afterwards.
  */
+
+/**
+ * What the size model has learned, and what it would say about the request being typed.
+ *
+ * Shown here rather than in the composer because this is the panel about what the application
+ * has learned from you, and a model whose accuracy nobody can see is one nobody can decide
+ * whether to trust. It reports its own error from cross-validation, not a confidence score
+ * invented for the display — the number is the one it was scored on before it was allowed to
+ * be shown at all.
+ */
+function SizeModelPanel({ prompt, revision }: { prompt: string; revision: number }) {
+  // Rebuilt from the corpus rather than stored: it trains in a few milliseconds at this size,
+  // and a stored model is one that can quietly disagree with the library it describes.
+  const model = useMemo(() => currentSizeModel(), [revision]);
+  const guess = useMemo(
+    () => (model && prompt.trim() ? predictSize(model, prompt) : null),
+    [model, prompt],
+  );
+
+  return (
+    <div className="tr-model">
+      <div className="tr-model-head">Learned dimensions</div>
+      <p>{describeModel(model)}</p>
+
+      {guess && (
+        <p className="tr-model-guess">
+          A part described this way is usually{' '}
+          <strong>
+            {guess.sizeMm.map((v: number) => (v >= 100 ? v.toFixed(0) : v.toFixed(1))).join(' × ')} mm
+          </strong>
+          {' '}— give or take {Math.round(guess.typicalError * 100)}%.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function TrainingDialog({ onClose }: { onClose: () => void }) {
   const docName = useModel((s) => s.doc.name);
   const featureCount = useModel((s) => s.doc.features.length);
@@ -137,6 +176,8 @@ export function TrainingDialog({ onClose }: { onClose: () => void }) {
           comes in, the closest examples are shown to the model as worked answers, so it builds
           in your vocabulary, at your dimensions, with your conventions.
         </p>
+
+        <SizeModelPanel prompt={prompt} revision={revision} />
 
         <details className="tr-what">
           <summary>What this does and does not do</summary>

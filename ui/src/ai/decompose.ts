@@ -35,6 +35,8 @@ import { exemplarBlock, exemplarsFor } from '../lib/training';
 import { expandQuery, referenceBlock } from '../reference/retrieve';
 import { auditPlan, summariseAudit, type Finding } from '../reference/audit';
 import { critique, repairPrompt, summariseCritique, type Critique } from './critique';
+import { reasonAbout, type Reasoning } from './reason';
+import { describeChecks } from './requirements';
 
 export interface DecomposeSuccess {
   ok: true;
@@ -53,6 +55,15 @@ export interface DecomposeSuccess {
   inspected: Critique[];
   /** True when a first attempt was rejected and the model was asked to correct it. */
   repaired: boolean;
+  /**
+   * The steps taken to get here, and whether the result meets what was asked.
+   *
+   * Kept on every route, not only the one that talks to a model. A check that runs on one path
+   * is a check the other paths are quietly exempt from — and the path that needed it most was
+   * the offline one, which used to match a recipe by name and hand back its designed size
+   * whatever dimensions the request had stated.
+   */
+  reasoning: Reasoning;
   ms: number;
 }
 
@@ -233,11 +244,20 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
         // on top of it. Both built into perfectly valid closed solids.
         const inspected = critique(audited.plan);
 
+        // Held to what was asked, and corrected if it can be. Until this existed, "a 400 mm
+        // long bracket" matched the word "bracket" and came back at the designed 180 mm.
+        const reasoned = reasonAbout(
+          text, buildAssembly(audited.plan),
+          `Matched the built-in ${recipe.label.toLowerCase()}, which is a designed decomposition ` +
+          'rather than a guess.',
+        );
+
         return {
           ok: true,
-          doc: buildAssembly(audited.plan),
+          doc: reasoned.doc,
           plan: audited.plan,
           route: 'recipe',
+          reasoning: reasoned.reasoning,
           message: [
             describePlan(audited.plan),
             // Said plainly rather than left to be discovered. Without a model there is no way
@@ -250,6 +270,7 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
             validated.plan.notes[0] ?? '',
             summary,
             summariseCritique(inspected),
+            reasoned.reasoning.checks.length > 0 ? describeChecks(reasoned.reasoning.checks) : '',
           ].filter(Boolean).join(' '),
           corrections: validated.corrections,
           dropped: validated.dropped,
@@ -283,12 +304,23 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
         ? ` Read: ${single.parsed.understood.join(', ')}.`
         : '';
 
+      const reasoned = reasonAbout(
+        text, doc,
+        `Recognised a ${archetype.label.toLowerCase()} in the built-in catalogue and sized it ` +
+        'from the request.',
+      );
+
       return {
         ok: true,
-        doc,
+        doc: reasoned.doc,
         plan: null,
         route: 'catalogue',
-        message: `Built a ${archetype.label.toLowerCase()}.${understood} ${single.result.warnings.join(' ')}`.trim(),
+        reasoning: reasoned.reasoning,
+        message: [
+          `Built a ${archetype.label.toLowerCase()}.${understood}`,
+          single.result.warnings.join(' '),
+          describeChecks(reasoned.reasoning.checks),
+        ].filter(Boolean).join(' ').trim(),
         corrections: [],
         dropped: [],
         citations: [],
@@ -410,13 +442,24 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
   const inspection = summariseCritique(inspected);
   if (inspection) parts.push(inspection);
 
+  // The same standard as the offline routes. A model that has researched an object still has
+  // to produce the size that was asked for, and it is no more exempt from being measured than
+  // a recipe is.
+  const reasoned = reasonAbout(
+    text, buildAssembly(plan),
+    `Decomposed by ${reply.model}${repaired ? ', then corrected after inspection' : ''}.`,
+  );
+  const met = describeChecks(reasoned.reasoning.checks);
+  if (met) parts.push(met);
+
   parts.push(`Built by ${reply.model} in ${(reply.ms / 1000).toFixed(1)} s.`);
 
   return {
     ok: true,
-    doc: buildAssembly(plan),
+    doc: reasoned.doc,
     plan,
     route: 'model',
+    reasoning: reasoned.reasoning,
     message: parts.join(' '),
     corrections: validated.corrections,
     dropped: validated.dropped,

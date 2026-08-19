@@ -83,6 +83,16 @@ function tokenise(src: string): Token[] | string {
     if (/[A-Za-z_]/.test(c)) {
       let j = i;
       while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
+
+      // A dot continues the name when a letter follows it, so `Base.height` is one reference
+      // to a feature's dimension rather than `Base` and a malformed number. Checked rather
+      // than assumed, because `2.5` and `Base.height` both contain a dot and only one of them
+      // is a name — and the number branch above has already claimed a leading dot.
+      while (src[j] === '.' && j + 1 < src.length && /[A-Za-z_]/.test(src[j + 1]!)) {
+        j++;
+        while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
+      }
+
       out.push({ t: 'name', v: src.slice(i, j) });
       i = j;
       continue;

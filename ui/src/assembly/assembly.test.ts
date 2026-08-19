@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  billOfMaterials, buildAssembly, describePlan, isArchetype, isPrimitive,
-  shapeVocabulary, validatePlan,
+  IDENTITY_PLACEMENT, billOfMaterials, buildAssembly, componentVolume, describePlan,
+  isArchetype, isPrimitive, shapeVocabulary, validatePlan,
 } from './plan';
 import { RECIPES, matchRecipe, namesSpecificProduct, phoneRecipe, recipeById } from './recipes';
 import { evaluateDocument } from '../model/document';
@@ -541,5 +541,55 @@ describe('recipe registry', () => {
       expect(r.summary.length).toBeGreaterThan(20);
       expect(r.aliases.length).toBeGreaterThan(1);
     }
+  });
+});
+
+describe('a plan that names choices, not just numbers', () => {
+  it('keeps a loft plane and section shapes through validation', () => {
+    // These were run through the expression evaluator, which reported "there is no parameter
+    // called rect" and dropped them — so the component silently rebuilt itself from the
+    // loft's stock defaults. An airliner's wing came back as a 60 mm duct transition.
+    const result = validatePlan({
+      name: 'Wing test',
+      components: [{
+        name: 'Wing', shape: 'loft',
+        params: {
+          plane: 'XZ', height: 15925,
+          baseShape: 'rect', baseLength: 6000, baseWidth: 700,
+          topShape: 'rect', topLength: 1600, topWidth: 187, topX: -7400,
+        },
+        placement: {},
+      }],
+    });
+
+    expect('error' in result).toBe(false);
+    if ('error' in result) return;
+
+    expect(result.corrections.filter((c: string) => /could not be worked out/.test(c))).toEqual([]);
+    expect(result.plan.components[0]!.params.plane).toBe('XZ');
+    expect(result.plan.components[0]!.params.baseShape).toBe('rect');
+    expect(result.plan.components[0]!.params.topLength).toBe(1600);
+  });
+
+  it('measures a lofted component by building it, not by guessing', () => {
+    // The inspector called a tapered wing "no volume" because there is no length x width x
+    // height to multiply. A wrong answer here is worse than none: it is what decides whether
+    // a component is reported as misplaced or oversized.
+    const wing = {
+      id: 'w', name: 'Wing', role: '', shape: 'loft',
+      params: {
+        plane: 'XZ', height: 15925,
+        baseShape: 'rect', baseLength: 6000, baseWidth: 700,
+        topShape: 'rect', topLength: 1600, topWidth: 187,
+      },
+      placement: IDENTITY_PLACEMENT, material: 'Aluminium', density: 2.7,
+      quantity: 1, operation: 'add' as const,
+    };
+
+    const volume = componentVolume(wing);
+    const rootPrism = 6000 * 700 * 15925;
+
+    expect(volume).toBeGreaterThan(0);
+    expect(volume).toBeLessThan(rootPrism * 0.6);   // a taper holds far less than its root
   });
 });

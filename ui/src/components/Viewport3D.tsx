@@ -4,7 +4,8 @@ import {
   viewMatrix, zoomAt, type CameraState, type NamedView,
 } from '../viewport/camera';
 import { SolidRenderer, webglAvailable } from '../viewport/renderer';
-import { bounds, triCount, type Mesh } from '../kernel/topo/mesh';
+import { bounds, getTriangle, triCount, type Mesh } from '../kernel/topo/mesh';
+import { matMul, xformPoint, type Mat4, type Vec3 } from '../kernel/math/vec';
 
 /**
  * The 3D viewport.
@@ -33,6 +34,14 @@ export interface Viewport3DProps {
   faceOwner: Map<number, string>;
   /** Face tag → a human-readable label, shown on hover. Ids are useless to a reader. */
   faceLabel?: Map<number, string>;
+  /**
+   * A colour per face id, three floats each.
+   *
+   * Separate from the mesh because it changes for different reasons: recolouring a component
+   * or changing its material does not move a vertex, and re-uploading the geometry to do it
+   * would be a rebuild the user did not ask for.
+   */
+  faceColours?: Float32Array | null;
   /** Feature id → inclusive face-tag range, so a whole feature highlights at once. */
   featureFaceRange: Map<string, [number, number]>;
   selectedFeatureId: string | null;
@@ -46,6 +55,24 @@ export interface Viewport3DProps {
   pickedFaces?: number[];
   /** Called on click with the face under the pointer; `additive` is shift-click. */
   onPickFace?: (faceId: number, additive: boolean) => void;
+  /**
+   * Called when a face has been dragged along its own normal, with the distance in millimetres.
+   *
+   * Positive is outwards. Reported once on release rather than continuously: each one becomes a
+   * feature and a rebuild, and committing on every pointer move would put a hundred of them in
+   * the tree for one drag.
+   */
+  onPushPull?: (faceId: number, distance: number) => void;
+  /** Outward normal of each face, so a drag can be resolved along it. */
+  faceNormals?: Map<number, [number, number, number]>;
+  /**
+   * What the right-click menu offers.
+   *
+   * Supplied rather than built here, because the useful actions are the ones that know about
+   * the document — round these faces, sketch on this one, delete the feature that made it —
+   * and a viewport that knew about those would not be a viewport any more.
+   */
+  menuActions?: (face: number) => { label: string; run: () => void; disabled?: boolean }[];
   /**
    * Moves the selected part by a world-space delta, in millimetres.
    *
@@ -118,6 +145,52 @@ const VIEW_BUTTONS: { view: NamedView; label: string; title: string }[] = [
   { view: 'right', label: 'RT', title: 'Right' },
 ];
 
+
+/**
+ * Which faces a screen rectangle covers.
+ *
+ * A triangle counts when its centroid projects inside the band, and a face counts when any of
+ * its triangles do. Centroids rather than exact triangle-rectangle overlap because a face is
+ * either obviously in the sweep or obviously not, and the exact test costs far more than the
+ * disagreement at the boundary is worth.
+ *
+ * Nothing here is depth-tested, so a sweep takes the faces on the far side of the part as
+ * well. That is what a crossing selection does in every package that has one, and it is what
+ * makes it useful for picking all six faces of a boss in one gesture.
+ */
+export function facesInBand(
+  mesh: Mesh, view: Mat4, projection: Mat4,
+  rect: { x0: number; y0: number; x1: number; y1: number },
+  width: number, height: number,
+): number[] {
+  const left = Math.min(rect.x0, rect.x1);
+  const right = Math.max(rect.x0, rect.x1);
+  const top = Math.min(rect.y0, rect.y1);
+  const bottom = Math.max(rect.y0, rect.y1);
+
+  const clip = matMul(projection, view);
+  const found = new Set<number>();
+  const tris = triCount(mesh);
+
+  for (let t = 0; t < tris; t++) {
+    const face = mesh.faceIds[t];
+    if (face === undefined || found.has(face)) continue;
+
+    const [a, b, c] = getTriangle(mesh, t);
+    const centre: Vec3 = [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
+    const p = xformPoint(clip, centre);
+
+    // Normalised device coordinates to pixels. Y flips: clip space counts up, the screen
+    // counts down.
+    const sx = ((p[0] + 1) / 2) * width;
+    const sy = ((1 - p[1]) / 2) * height;
+
+    if (sx >= left && sx <= right && sy >= top && sy <= bottom) found.add(face);
+  }
+
+  return [...found];
+}
+
 export function Viewport3D(props: Viewport3DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -127,6 +200,15 @@ export function Viewport3D(props: Viewport3DProps) {
   const [size, setSize] = useState<[number, number]>([800, 600]);
   const [hoverFace, setHoverFace] = useState(-1);
   const [showEdges, setShowEdges] = useState(true);
+
+  /**
+   * The section plane: which axis it cuts along, and how far through the part.
+   *
+   * Kept as a fraction rather than a coordinate so the slider means the same thing on a 6 mm
+   * washer and on a 37 m airliner — dragging to the middle shows you the middle of whatever is
+   * on screen.
+   */
+  const [section, setSection] = useState<{ axis: 0 | 1 | 2; at: number } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
   // Kept in a ref as well as state: the pointer handlers need the current camera without
@@ -134,7 +216,23 @@ export function Viewport3D(props: Viewport3DProps) {
   const cameraRef = useRef(camera);
   cameraRef.current = camera;
 
-  const dragRef = useRef<{ mode: 'orbit' | 'pan' | 'move'; x: number; y: number } | null>(null);
+  const dragRef = useRef<
+    {
+      mode: 'orbit' | 'pan' | 'move' | 'band' | 'push';
+      x: number; y: number; x0: number; y0: number;
+      /** The face being pushed, and how far it has travelled so far. */
+      face?: number; distance?: number;
+    } | null
+  >(null);
+
+  /** How far the face under the pointer has been dragged, while a push is in progress. */
+  const [pushing, setPushing] = useState<{ face: number; distance: number } | null>(null);
+
+  /** The rubber band, in client pixels, while one is being dragged. */
+  const [band, setBand] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+
+  /** Where the context menu is, in client pixels, and what it was opened on. */
+  const [menu, setMenu] = useState<{ x: number; y: number; face: number } | null>(null);
   const [hasFitted, setHasFitted] = useState(false);
   const fittedKeyRef = useRef<string | undefined>(undefined);
 
@@ -201,6 +299,12 @@ export function Viewport3D(props: Viewport3DProps) {
     r.setEdges(props.edges);
   }, [props.mesh, props.edges]);
 
+  // Colour separately from geometry: a recolour is not a rebuild. The draw below lists
+  // `props.faceColours` among its dependencies, so this upload is followed by a redraw.
+  useEffect(() => {
+    rendererRef.current?.setFaceColours(props.faceColours ?? null);
+  }, [props.faceColours]);
+
   // Frame the part when something first appears, and again whenever this becomes a different
   // part — an import, an opened file, a new build.
   //
@@ -221,6 +325,20 @@ export function Viewport3D(props: Viewport3DProps) {
   }, [props.mesh, aspect, hasFitted, fitKey]);
 
   // ── drawing ──
+
+  // The fraction resolved against the part's own bounding box, recomputed when either changes.
+  const sectionPlane = useMemo(() => {
+    if (!section || triCount(props.mesh) === 0) return null;
+
+    const bb = bounds(props.mesh);
+    const lo = bb.min[section.axis]!;
+    const hi = bb.max[section.axis]!;
+
+    const normal: [number, number, number] = [0, 0, 0];
+    normal[section.axis] = 1;
+
+    return { normal, offset: lo + (hi - lo) * section.at };
+  }, [section, props.mesh]);
 
   const view = useMemo(() => viewMatrix(camera), [camera]);
   const projection = useMemo(() => projectionMatrix(camera, aspect), [camera, aspect]);
@@ -246,8 +364,9 @@ export function Viewport3D(props: Viewport3DProps) {
       selectedFeatureRange: selectedRange,
       showEdges,
       dark: props.dark !== false,
+      section: sectionPlane,
     });
-  }, [view, projection, size, props.pickedFaces, hoverFace, selectedRange, showEdges, props.dark, props.mesh]);
+  }, [view, projection, size, props.pickedFaces, hoverFace, selectedRange, showEdges, props.dark, props.mesh, props.faceColours, sectionPlane]);
 
   // ── interaction ──
 
@@ -271,12 +390,36 @@ export function Viewport3D(props: Viewport3DProps) {
     // Middle button or shift pans, matching the convention in every CAD package. The right
     // button moves the selected part — the camera has two ways to be driven already, and the
     // model had none.
-    const mode = e.button === 2 && props.selectedFeatureId && props.onMovePart
-      ? 'move'
-      : e.button === 1 || e.shiftKey ? 'pan' : 'orbit';
+    setMenu(null);
 
-    dragRef.current = { mode, x: e.clientX, y: e.clientY };
-  }, [props.selectedFeatureId, props.onMovePart]);
+    // Ctrl-drag sweeps a rubber band over faces. Ctrl rather than a bare drag because a bare
+    // drag has to stay orbit — a viewport where dragging sometimes turns the model and
+    // sometimes selects is one you cannot use without looking at the modifier key first.
+    /*
+     * Grabbing a face that is already selected pushes or pulls it; anything else orbits.
+     *
+     * Click once to select, then drag — which is the gesture people arrive with, and it does
+     * not cost the plain drag its meaning. Requiring the face to be selected first is what
+     * keeps orbit predictable: a drag that started anywhere else on the model still turns it.
+     */
+    const under = e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey
+      ? pickAt(e.clientX, e.clientY)
+      : -1;
+    const grabbing = under >= 0 && (props.pickedFaces ?? []).includes(under) && !!props.onPushPull;
+
+    const mode = e.ctrlKey || e.metaKey ? 'band'
+      : grabbing ? 'push'
+      : e.button === 2 && props.selectedFeatureId && props.onMovePart ? 'move'
+      : e.button === 1 || e.shiftKey ? 'pan'
+      : 'orbit';
+
+    dragRef.current = {
+      mode, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY,
+      ...(mode === 'push' ? { face: under, distance: 0 } : {}),
+    };
+    if (mode === 'push') setPushing({ face: under, distance: 0 });
+    if (mode === 'band') setBand({ x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY });
+  }, [props.selectedFeatureId, props.onMovePart, props.onPushPull, props.pickedFaces, pickAt]);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     const drag = dragRef.current;
@@ -284,6 +427,45 @@ export function Viewport3D(props: Viewport3DProps) {
     if (!drag) {
       const face = pickAt(e.clientX, e.clientY);
       setHoverFace(face);
+      return;
+    }
+
+    if (drag.mode === 'band') {
+      setBand({ x0: drag.x0, y0: drag.y0, x1: e.clientX, y1: e.clientY });
+      return;
+    }
+
+    if (drag.mode === 'push') {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const normal = props.faceNormals?.get(drag.face ?? -1);
+      if (!rect || !normal) return;
+
+      /*
+       * The pointer's travel, projected onto the face normal as it appears on screen.
+       *
+       * Projected rather than taken as raw vertical motion, so dragging *along* the face slides
+       * nothing and dragging *away* from it moves the full amount — which is what makes the
+       * gesture feel like pushing the face rather than like moving a slider that happens to be
+       * attached to it.
+       */
+      const c = cameraRef.current;
+      const [right, up] = screenAxes(c);
+      const screenX = normal[0] * right[0] + normal[1] * right[1] + normal[2] * right[2];
+      const screenY = normal[0] * up[0] + normal[1] * up[1] + normal[2] * up[2];
+
+      const length = Math.hypot(screenX, screenY);
+      if (length < 1e-6) return;   // the face is edge-on: there is no direction to drag along
+
+      // Pixels to millimetres through the view height, so the face keeps pace with the
+      // pointer at any zoom.
+      const perPixel = viewHeightMm(c) / Math.max(1, rect.height);
+      const dx = e.clientX - drag.x0;
+      const dy = -(e.clientY - drag.y0);
+
+      const distance = ((dx * screenX + dy * screenY) / length) * perPixel;
+
+      drag.distance = distance;
+      setPushing({ face: drag.face!, distance });
       return;
     }
 
@@ -325,6 +507,56 @@ export function Viewport3D(props: Viewport3DProps) {
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     const drag = dragRef.current;
     dragRef.current = null;
+
+    if (drag?.mode === 'push') {
+      setPushing(null);
+      const distance = drag.distance ?? 0;
+      if (Math.abs(distance) > 0.05) props.onPushPull?.(drag.face!, distance);
+      return;
+    }
+
+    if (drag?.mode === 'band') {
+      setBand(null);
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const moved = Math.abs(e.clientX - drag.x0) > 3 || Math.abs(e.clientY - drag.y0) > 3;
+
+      if (rect && moved) {
+        // The band is in client pixels and the projection works in canvas pixels, so both
+        // ends are converted through the same rect rather than through the device ratio,
+        // which is not the same number when the canvas is scaled by CSS.
+        const toCanvas = (cx: number, cy: number) => [
+          ((cx - rect.left) / rect.width) * size[0],
+          ((cy - rect.top) / rect.height) * size[1],
+        ] as const;
+        const [ax, ay] = toCanvas(drag.x0, drag.y0);
+        const [bx, by] = toCanvas(e.clientX, e.clientY);
+
+        const swept = facesInBand(
+          props.mesh,
+          viewMatrix(cameraRef.current),
+          projectionMatrix(cameraRef.current, aspect),
+          { x0: ax, y0: ay, x1: bx, y1: by },
+          size[0], size[1],
+        );
+
+        // Cleared first unless extending, so a fresh sweep replaces the previous one rather
+        // than adding to it — which is what every package does and what makes a mis-sweep
+        // recoverable by sweeping again.
+        if (!e.shiftKey) props.onPickFace?.(-1, false);
+        for (const face of swept) props.onPickFace?.(face, true);
+      }
+      return;
+    }
+
+    // A right click that did not drag opens the menu rather than doing nothing. Right-drag
+    // still moves the selected part; the two do not collide because one moved and one did not.
+    if (drag && e.button === 2
+      && Math.abs(e.clientX - drag.x0) < 3 && Math.abs(e.clientY - drag.y0) < 3) {
+      const face = pickAt(e.clientX, e.clientY);
+      setMenu({ x: e.clientX, y: e.clientY, face });
+      if (face >= 0) props.onSelectFeature(props.faceOwner.get(face) ?? null);
+      return;
+    }
 
     // A click that did not move is a selection, not the end of an orbit. A move drag is never
     // a selection, however short — releasing after nudging a part must not reselect whatever
@@ -384,6 +616,10 @@ export function Viewport3D(props: Viewport3DProps) {
         return;
       }
       if (e.key === 'f' || e.key === 'F') { doFit(); e.preventDefault(); }
+      if (e.key === 's' || e.key === 'S') {
+        setSection((v) => (v ? null : { axis: 0, at: 0.5 }));
+        e.preventDefault();
+      }
       if (e.key === 'e' || e.key === 'E') { setShowEdges((v) => !v); e.preventDefault(); }
     };
 
@@ -451,7 +687,38 @@ export function Viewport3D(props: Viewport3DProps) {
         >
           EDG
         </button>
+        <button
+          title="Section view — cut the part open to see inside it (S)"
+          aria-pressed={section !== null}
+          onClick={() => setSection((v) => (v ? null : { axis: 0, at: 0.5 }))}
+        >
+          SEC
+        </button>
       </div>
+
+      {section && (
+        <div className="vp3d-section" role="group" aria-label="Section plane">
+          {(['X', 'Y', 'Z'] as const).map((axis, i) => (
+            <button
+              key={axis}
+              title={`Cut along ${axis}`}
+              aria-pressed={section.axis === i}
+              onClick={() => setSection({ axis: i as 0 | 1 | 2, at: section.at })}
+            >
+              {axis}
+            </button>
+          ))}
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.005}
+            value={section.at}
+            aria-label="How far through the part to cut"
+            onChange={(e) => setSection({ axis: section.axis, at: Number(e.target.value) })}
+          />
+        </div>
+      )}
 
       {props.status && props.status.length > 0 && (
         <div className="vp3d-status">
@@ -469,6 +736,52 @@ export function Viewport3D(props: Viewport3DProps) {
           {props.faceLabel?.get(hoverFace) ?? props.faceOwner.get(hoverFace)}
         </div>
       )}
+
+      {pushing && (
+        <div className="vp3d-push" role="status">
+          {pushing.distance >= 0 ? 'Pull' : 'Push'} {Math.abs(pushing.distance).toFixed(1)} mm
+        </div>
+      )}
+
+      {band && (() => {
+        const rect = wrapRef.current?.getBoundingClientRect();
+        if (!rect) return null;
+        return (
+          <div
+            className="vp3d-band"
+            style={{
+              left: Math.min(band.x0, band.x1) - rect.left,
+              top: Math.min(band.y0, band.y1) - rect.top,
+              width: Math.abs(band.x1 - band.x0),
+              height: Math.abs(band.y1 - band.y0),
+            }}
+          />
+        );
+      })()}
+
+      {menu && (() => {
+        const rect = wrapRef.current?.getBoundingClientRect();
+        const actions = props.menuActions?.(menu.face) ?? [];
+        if (!rect || actions.length === 0) return null;
+        return (
+          <div
+            className="vp3d-menu"
+            style={{ left: menu.x - rect.left, top: menu.y - rect.top }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {actions.map((a) => (
+              <button
+                key={a.label}
+                type="button"
+                disabled={a.disabled}
+                onClick={() => { a.run(); setMenu(null); }}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }

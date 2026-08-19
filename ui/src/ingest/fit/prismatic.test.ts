@@ -105,16 +105,30 @@ describe('recovering a profile', () => {
 });
 
 describe('refusing what one profile cannot describe', () => {
-  it('blames the import, not the profile, when the solid is not sound', () => {
-    // 423-0292 imports non-manifold. Slicing counts surface crossings, so on a solid with a
-    // doubled face the section comes back the wrong size with nothing looking wrong — it read
-    // as "poor fit" at 68% when the truth was that the input was not a solid. Which of the two
-    // it is decides where the next work goes.
+  it('blames the input when the solid is genuinely not sound', () => {
+    // Slicing counts surface crossings, so on a solid with a missing face the section comes
+    // back the wrong size with nothing looking wrong. Which of the two it is — a limit of this
+    // reader, or an input that was never a solid — decides where the next work goes.
+    const holed = box(40, 40, 40, [0, 0, 0], 'Block');
+    const broken = {
+      ...holed,
+      // Drop one triangle. The mesh is now open, and any section through it is a lie.
+      indices: holed.indices.slice(0, holed.indices.length - 3),
+      faceIds: holed.faceIds.slice(0, holed.faceIds.length - 1),
+    };
+
+    const result = fitPrismatic(broken);
+    expect(result.best).toBeNull();
+    expect(result.reason).toMatch(/not sound/);
+  });
+
+  it('refuses a two-body part read as one mesh, because it is not one stack', () => {
+    // 423-0292 is two solids. Read as a single mesh it is not a stack of slabs and is
+    // refused — correctly. Read as its bodies, each is measured on its own.
     const result = fitPrismatic(real('423-0292.STEP'));
 
     expect(result.best).toBeNull();
-    expect(result.reason).toMatch(/not sound/);
-    expect(result.reason).toMatch(/non-manifold/);
+    expect(result.reason).toBeTruthy();
   });
 
   it('refuses a revolved part, which has no extrusion axis at all', () => {
@@ -172,12 +186,31 @@ describe('against the real library', () => {
     expect(fit.agreement).toBeGreaterThan(0.97);
   });
 
-  it('reads three of the four, and says why the fourth cannot be read', () => {
-    const outcomes = ['100-0194.step', '100-0587_0.step', '423-0293.STEP', '423-0292.STEP']
-      .map((name) => [name, fitPrismatic(real(name)).best !== null] as const);
+  it('reads three of the four', () => {
+    const ok = ['100-0194.step', '100-0587_0.step', '423-0293.STEP']
+      .map((name) => fitPrismatic(real(name)).best);
 
-    expect(outcomes.filter(([, ok]) => ok)).toHaveLength(3);
-    expect(fitPrismatic(real('423-0292.STEP')).reason).toMatch(/not sound/);
+    expect(ok.filter(Boolean)).toHaveLength(3);
+  });
+
+  it('reads the fourth as two bodies, one of which nearly fits on its own', () => {
+    // The measurement that says where the remaining work is: not in the importer, which now
+    // returns both bodies closed, but in the fitter — one body is a 96.7% stack, just under
+    // the bar, and the other is not a stack at all.
+    const { bodies } = (() => {
+      const r = readStep(readFileSync('src/ingest/step/fixtures/423-0292.STEP', 'utf8'));
+      if ('error' in r) throw new Error(r.error);
+      return r;
+    })();
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies.every((b) => b.closed)).toBe(true);
+
+    const scores = bodies
+      .map((b) => fitPrismatic(b.mesh, { accept: 0 }).best?.agreement ?? 0)
+      .sort((x, y) => y - x);
+
+    expect(scores[0]).toBeGreaterThan(0.95);
   });
 });
 
