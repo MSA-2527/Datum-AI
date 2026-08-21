@@ -12,7 +12,7 @@ The 100× in-process/out-of-process performance gap and the STA threading constr
 ┌──────────────────────────────── SLDWORKS.exe (STA) ────────────────────────────────┐
 │                                                                                     │
 │   ┌───────────────────────────────────────────────────────────────────────────┐    │
-│   │  DATUM.Kernel  —  in-process add-in (ISwAddin, .NET Framework 4.8)         │    │
+│   │  DATUM.Connector.SolidWorks  —  in-process add-in (ISwAddin, .NET Framework 4.8)         │    │
 │   │                                                                            │    │
 │   │   OpExecutor        typed op → SOLIDWORKS API calls, on the STA thread     │    │
 │   │   IdlePump          drains the work queue on OnIdleNotify                  │    │

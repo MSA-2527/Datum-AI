@@ -33,13 +33,37 @@ Diameter, Centre X/Y/Z.
 Draw a closed profile, constrain it, extrude it.
 
 1. Add **Sketch**. The editor opens with a drawing canvas.
-2. Draw lines, rectangles or circles.
+2. Pick a tool and draw.
 3. Relations are added automatically — lines within 5° of horizontal or vertical are snapped
    and constrained.
 4. Click any dimension on the canvas to type an exact value. It becomes a driving dimension.
 5. Set **Thickness** to extrude it.
 
-Plane: Top (XY), Front (XZ) or Right (YZ). Draft tapers the walls as it extrudes.
+**Tools**
+
+| Tool | Clicks |
+|---|---|
+| Line | Each click continues the chain |
+| Rectangle | Two opposite corners. Drawn as two horizontals and two verticals, so dragging a corner resizes it instead of shearing it |
+| Circle | Centre, then a point on it |
+| Arc | Centre, start, end — counter-clockwise from start to end |
+| Hexagon | Centre, then a corner. Sides held equal by constraint |
+| Slot | The two ends of the axis, then a third click for the width |
+
+**Snapping.** A click within 4 mm of an existing point lands *on* it, so the corner is shared
+and the loop closes because it is closed — rather than looking joined and solving as two open
+chains.
+
+**Dragging.** With **Select** active, drag any point. The rest of the sketch follows its
+constraints: drag a rectangle's corner and it resizes, staying a rectangle. Dimensions are
+preserved — a 50 mm line stays 50 mm however its end is pulled about.
+
+**Constraints.** All 22 the solver knows: horizontal, vertical, parallel, perpendicular, equal,
+coincident, distance, radius, concentric, tangent, angle, symmetric, point-on-line,
+point-on-circle, fix X, fix Y. Select the entities, then the constraint.
+
+Plane: Top (XY), Front (XZ), Right (YZ), or a datum plane. Draft tapers the walls as it
+extrudes.
 
 ### Extrude
 Push a profile along its plane's normal.
@@ -196,6 +220,27 @@ offset from, or tilted relative to, anything that exists yet.
 
 A feature pointing at a datum that has been deleted falls back to its named plane rather than
 refusing, so an older document still builds.
+
+### Sheet metal
+A folded sheet part.
+
+| Parameter | Meaning |
+|---|---|
+| Shape | Angle (one bend), Channel (two the same way), Z (two opposite ways) |
+| Material thickness | |
+| Width across the sheet | |
+| Inside bend radius | |
+| Bend angle | |
+| Flanges | The straight lengths between the bends |
+
+Bends are real radii, not knife edges — a press brake cannot make a sharp corner, and a model
+showing one lies about what will arrive.
+
+The **flat pattern** is the other half. A sheet part exists twice: as the folded shape and as the
+blank a laser cuts, related by how much the material stretches round each bend. Bend allowance is
+`angle × (radius + K × thickness)`, K defaulting to 0.44 — the fraction of the way through the
+thickness the neutral axis sits. A shop with its own press will have measured its own K, and it
+is the number to change if parts come back the wrong length.
 
 ### Linear pattern
 Repeat the previous feature along a direction. Count, Spacing, and the direction as dx/dy/dz.
@@ -402,6 +447,27 @@ a mounting plate in 6061
 Two dimensions that demand different scale factors cannot both be met — it says so instead of
 picking one.
 
+### Editing what is open
+The assistant changes the model on screen rather than always starting a new one. All of these
+work with no model configured:
+
+```
+make the base plate 20 mm thick
+the bolt holes should be 12 mm diameter
+add a 3 mm fillet
+delete the bolt holes
+turn off the fillet
+rename Base plate to Web
+```
+
+An edit is checked but never rescaled — it already says what to change and to what.
+
+Ambiguity is refused rather than guessed. "The plate" on a model with `Base plate` and `Top
+plate` is genuinely ambiguous, and the reply names both instead of picking one. A parameter the
+feature does not have is refused with a list of the ones it does.
+
+Feature names are matched without their auto-numbering, so "the fillet" finds `Fillet1`.
+
 ### With a language model
 Set one in **AI: off**. It adds: research of real products, decomposition of objects not in the
 catalogue, and a repair pass where a first attempt that fails inspection is sent back.
@@ -459,7 +525,72 @@ against every line.
 
 ---
 
-## 11. Anodizing rack
+## 11. Exact geometry
+
+**Exact** rebuilds the open part with real surfaces instead of triangles.
+
+DATUM's own kernel is triangles: a cylinder is twenty-four flat strips. That is fast, needs no
+download, and is enough for design and massing. It is not enough when accuracy matters — a 40 mm
+cylinder measures 4.5% short, and a fillet is a swept tool cut from the solid rather than a true
+blend.
+
+Pressing **Exact** rebuilds through OpenCascade:
+
+| | Volume of a 40 × 50 cylinder | Faces |
+|---|---|---|
+| Triangles | 60.00 cm³ | a band of strips |
+| Exact | 62.83 cm³ | 3 |
+
+A blended box comes back with 26 faces — six flats, twelve edge blends and eight corner patches.
+Those corners are what the triangle kernel cannot produce.
+
+**The first press downloads 63 MB, once.** It is never loaded when you open the page, so DATUM
+still starts instantly, and nobody who does not use it ever downloads it.
+
+**What converts:** boxes, cylinders, spheres, cut/fuse/intersect, and fillets. Sweeps, lofts,
+traced reliefs and sheet metal do not yet — and the reply names anything it had to leave behind
+rather than quietly omitting it.
+
+**It is a view, not a conversion.** The feature tree stays the document and every edit rebuilds
+the ordinary model. Exact geometry is for measuring and exporting, not a different model.
+
+---
+
+## 12. Configurations
+
+One document, several sizes of the part it describes. A configuration is a named set of parameter
+values plus which features are suppressed — nothing else, so two configurations can never drift
+into being different designs.
+
+Switching one applies the values and rebuilds, so every configuration is always the current
+design rather than a snapshot taken whenever someone last remembered to update it.
+
+A parameter a configuration does not name is left alone, so adding a parameter later does not
+make it vanish from the older configurations.
+
+---
+
+## 13. Engineering calculators
+
+Closed-form results, not simulation.
+
+| | Gives |
+|---|---|
+| Beam | Deflection and bending stress for four load cases, against yield with the margin stated |
+| Bolt | Preload, tightening torque, friction grip, shear capacity |
+| Press fit | Interface pressure, torque capacity, press-in force, hub hoop stress |
+| Buckling | Euler load *and* the crushing load, so a stubby column is not given a number it cannot take |
+| Fit | ISO 286 hole and shaft limits, the clearance, and what the fit actually does |
+
+Every one reports what it assumes. A deflection figure with no statement of the end conditions is
+a number someone will use for a case it does not describe.
+
+Where a result crosses a limit — over yield, a joint that will slip, parts that will not
+assemble — it says so rather than leaving it to be noticed.
+
+---
+
+## 14. Anodizing rack
 
 **Rack for this** sizes a rack for the open part: area, current, section, cooling and contacts.
 

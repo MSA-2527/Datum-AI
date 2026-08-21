@@ -81,54 +81,125 @@ export function loopsOf(s: Sketch): { closed: Vec2[][]; openChains: number } {
     return e && e.kind === 'point' ? [e.x, e.y] : null;
   };
 
-  // Adjacency over point ids, through non-construction lines.
-  const at = new Map<EntityId, { line: EntityId; to: EntityId }[]>();
-  const lines: { id: EntityId; a: EntityId; b: EntityId }[] = [];
+  /*
+   * Adjacency over point ids, through both lines and arcs.
+   *
+   * An arc is an edge of the outline exactly as a line is — it joins two points, and a profile
+   * that walks only the lines silently drops every curved side. Until this existed the arc
+   * entity was a type with nothing behind it: a sketch containing one could be drawn, solved
+   * and saved, and then reported as having no closed outline.
+   *
+   * Each edge carries the points to emit while traversing it, so an arc contributes its curve
+   * and a line contributes nothing but its endpoint.
+   */
+  const at = new Map<EntityId, { edge: EntityId; to: EntityId; via: Vec2[] }[]>();
+  const edges: { id: EntityId; a: EntityId; b: EntityId }[] = [];
+
+  const link = (id: EntityId, a: EntityId, b: EntityId, forward: Vec2[], backward: Vec2[]) => {
+    edges.push({ id, a, b });
+    for (const [from, to, via] of [[a, b, forward], [b, a, backward]] as const) {
+      const list = at.get(from);
+      const entry = { edge: id, to, via };
+      if (list) list.push(entry); else at.set(from, [entry]);
+    }
+  };
 
   for (const e of s.entities.values()) {
-    if (e.kind !== 'line' || e.construction) continue;
-    lines.push({ id: e.id, a: e.start, b: e.end });
+    if (e.kind === 'point' || e.kind === 'circle') continue;
+    if (e.construction) continue;
 
-    for (const [from, to] of [[e.start, e.end], [e.end, e.start]] as const) {
-      const list = at.get(from);
-      const entry = { line: e.id, to };
-      if (list) list.push(entry); else at.set(from, [entry]);
+    if (e.kind === 'line') {
+      link(e.id, e.start, e.end, [], []);
+      continue;
+    }
+
+    if (e.kind === 'arc') {
+      const c = point(e.centre), a = point(e.start), b = point(e.end);
+      if (!c || !a || !b) continue;
+
+      const forward = arcPoints(c, a, b);
+      link(e.id, e.start, e.end, forward, [...forward].reverse());
     }
   }
 
-  const usedLines = new Set<EntityId>();
+  const used = new Set<EntityId>();
   const closed: Vec2[][] = [];
   let openChains = 0;
 
-  for (const seed of lines) {
-    if (usedLines.has(seed.id)) continue;
+  for (const seed of edges) {
+    if (used.has(seed.id)) continue;
 
     const startPoint = seed.a;
-    const ring: EntityId[] = [startPoint];
+    const ring: Vec2[] = [];
+
+    const first = point(startPoint);
+    if (!first) continue;
+    ring.push(first);
+
+    // The seed edge's own curve, then its far end.
+    const seedEntry = (at.get(startPoint) ?? []).find((x) => x.edge === seed.id);
+    if (seedEntry) ring.push(...seedEntry.via);
+
     let current = seed.b;
-    usedLines.add(seed.id);
+    used.add(seed.id);
     let ok = true;
 
     while (current !== startPoint) {
-      ring.push(current);
+      const here = point(current);
+      if (!here) { ok = false; break; }
+      ring.push(here);
 
-      const next = (at.get(current) ?? []).find((x) => !usedLines.has(x.line));
+      const next = (at.get(current) ?? []).find((x) => !used.has(x.edge));
       if (!next) { ok = false; break; }
 
-      usedLines.add(next.line);
+      used.add(next.edge);
+      ring.push(...next.via);
       current = next.to;
 
       // A malformed graph must not spin.
-      if (ring.length > lines.length + 1) { ok = false; break; }
+      if (ring.length > edges.length * 80 + 8) { ok = false; break; }
     }
 
     if (!ok || ring.length < 3) { openChains++; continue; }
-
-    const pts = ring.map(point).filter((p): p is Vec2 => p !== null);
-    if (pts.length >= 3) closed.push(pts);
+    closed.push(ring);
   }
 
   return { closed, openChains };
+}
+
+/**
+ * The curve of an arc, excluding both endpoints.
+ *
+ * Counter-clockwise from start to end, which is the convention `addArc` records. Endpoints are
+ * left out because the walk already emits them — including them would put a duplicate point at
+ * every arc junction, and a zero-length edge is not something the kernel accepts.
+ *
+ * The radius is averaged over the two ends rather than taken from one. They are held equal by
+ * the arc's own constraint, but a sketch that has not converged, or one being dragged, can have
+ * them differ by a little, and favouring one end would make the curve visibly leave the other.
+ */
+function arcPoints(centre: Vec2, start: Vec2, end: Vec2): Vec2[] {
+  const r0 = Math.hypot(start[0] - centre[0], start[1] - centre[1]);
+  const r1 = Math.hypot(end[0] - centre[0], end[1] - centre[1]);
+  const r = (r0 + r1) / 2;
+  if (!(r > 1e-9)) return [];
+
+  const a0 = Math.atan2(start[1] - centre[1], start[0] - centre[0]);
+  const a1 = Math.atan2(end[1] - centre[1], end[0] - centre[0]);
+
+  let sweep = a1 - a0;
+  while (sweep <= 1e-9) sweep += Math.PI * 2;
+
+  // Enough segments that the chordal error stays under a thousandth of the radius, which is
+  // finer than anything downstream can see, and bounded so a full turn is not free.
+  const segments = Math.max(2, Math.min(64, Math.ceil(sweep / 0.09)));
+
+  const out: Vec2[] = [];
+  for (let i = 1; i < segments; i++) {
+    const t = a0 + (sweep * i) / segments;
+    out.push([centre[0] + r * Math.cos(t), centre[1] + r * Math.sin(t)]);
+  }
+  return out;
 }
 
 /** A circle as a polygon, fine enough that the chordal error is below a thousandth. */

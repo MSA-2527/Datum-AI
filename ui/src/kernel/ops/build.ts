@@ -129,7 +129,33 @@ export function extrude(profile: Profile, plane: Plane, opts: ExtrudeOptions): M
     const idForSegment: number[] = new Array(n).fill(wallId);
     if (!circular) {
       for (const run of sides as number[][]) {
-        const id = mb.addTag({ feature, kind: 'planar', normal: dir });
+        /*
+         * A side wall's normal is its own, not the extrusion's.
+         *
+         * It was `dir` here, which is the direction the profile was swept along — so every
+         * vertical wall of an extruded box reported a normal of +Z, the same as its lid. That
+         * is wrong in the most quietly damaging way available: the tag is present, well-formed
+         * and confidently incorrect, so nothing errors. Anything reading it to decide which way
+         * a face points — a draft check, a section, a measurement between two faces, a drawing
+         * deciding which view a face is visible in — got the sweep axis and had no way to know.
+         *
+         * The wall's outward normal is perpendicular both to the sweep and to the edge it
+         * stands on. Turning the 2D edge direction a quarter turn gives it in profile
+         * coordinates: outward for a CCW outer loop, and — because holes are wound the other
+         * way — outward for those too, where outward means "away from the material".
+         */
+        const i0 = run[0]!;
+        const a = loop.top[i0]!;
+        const b = loop.top[(i0 + 1) % loop.top.length]!;
+        const ex = b[0] - a[0];
+        const ey = b[1] - a[1];
+        const elen = Math.hypot(ex, ey);
+
+        const normal = elen < 1e-12
+          ? dir
+          : norm3(sub3(lift([ey / elen, -ex / elen], plane), lift([0, 0], plane)));
+
+        const id = mb.addTag({ feature, kind: 'planar', normal });
         for (const i of run) idForSegment[i] = id;
       }
     }
@@ -294,7 +320,52 @@ export interface RevolveOptions {
  * manifold check. And a profile touching the axis produces degenerate zero-radius triangles
  * along it; those are dropped by the builder's repeated-vertex guard, which is exactly what
  * makes a revolved sphere or cone come out closed rather than with a puncture at the pole.
+ *
+ * A profile that *crosses* the axis is a third case, and the only one that cannot be built at
+ * all — see `profileCrossesAxis`. Callers are expected to ask first.
  */
+/**
+ * Whether a profile straddles the axis it is about to be revolved around.
+ *
+ * A revolve is only defined for a profile lying wholly on one side of its axis. Cross it, and
+ * the material on the far side sweeps through the same space as the material on the near side
+ * but wound the other way, so the two cancel: the result is a self-intersecting shell with
+ * **zero volume** that still passes every closure and manifold test there is, because it is
+ * closed and it is manifold. It is simply not a solid.
+ *
+ * That is why this is a question a caller has to ask rather than something the mesh can be
+ * checked for afterwards. The default revolve in the feature tree was exactly this case — a
+ * 60 mm section centred on the axis, which spans −30 to +30 — and it produced a confident
+ * 696-triangle "closed solid" of 0.00 cm³ that the viewport drew, the mass properties weighed
+ * at nothing, and no check anywhere objected to.
+ *
+ * Touching the axis is fine and is how a sphere, a cone and a shaft end are made; only
+ * crossing it is not.
+ */
+export function profileCrossesAxis(
+  profile: Profile, plane: Plane, axisOrigin: Vec3, axisDir: Vec3,
+): boolean {
+  const axis = norm3(axisDir);
+  let positive = false;
+  let negative = false;
+
+  // Signed position across the axis, measured in the plane and perpendicular to the axis.
+  // A profile plane containing the axis has one such direction; one that does not contain it
+  // cannot cross it either, and the test degenerates safely to "no".
+  const across = cross3(axis, plane.normal);
+  if (len3(across) < 1e-9) return false;
+  const dir = norm3(across);
+
+  for (const p of [profile.outer, ...profile.holes].flat()) {
+    const side = dot3(sub3(lift(p, plane), axisOrigin), dir);
+
+    if (side > 1e-9) positive = true;
+    if (side < -1e-9) negative = true;
+    if (positive && negative) return true;
+  }
+  return false;
+}
+
 export function revolve(profile: Profile, plane: Plane, opts: RevolveOptions): Mesh {
   const feature = opts.feature ?? 'Revolve';
   const axis = norm3(opts.axisDir);
@@ -384,9 +455,39 @@ export function revolve(profile: Profile, plane: Plane, opts: RevolveOptions): M
   }
 
   if (!full) {
-    // Partial revolve needs a flat face at each end to close it.
-    const startId = mb.addTag({ feature, kind: 'planar' });
-    const endId = mb.addTag({ feature, kind: 'planar' });
+    /*
+     * Partial revolve needs a flat face at each end to close it.
+     *
+     * Both are given their direction, which they went without. A tag with no normal is not as
+     * bad as a tag with the wrong one — nothing can be misled by an absence — but it is still a
+     * face whose direction is perfectly knowable being reported as unknown, and everything that
+     * asks which way it points is answered with `undefined`: a section cannot decide which side
+     * of it to keep, a measurement between it and another face has nothing to work with, and a
+     * draft check silently skips it.
+     *
+     * The start cap *is* the profile, so it lies in the profile plane and its normal is that
+     * plane's. The end cap is the same plane carried round by the sweep, so its normal is the
+     * profile plane's rotated about the axis through the sweep angle — taken as the difference
+     * of two transformed points, since the rotation is expressed as a full transform and
+     * applying it to a direction directly would add the translation with it.
+     */
+    const spin = rotationAbout(opts.axisOrigin, axis, sweep);
+    const capNormal = norm3(plane.normal);
+    const endNormal = norm3(sub3(
+      xformPoint(spin, add3(opts.axisOrigin, capNormal)),
+      xformPoint(spin, opts.axisOrigin),
+    ));
+
+    const startId = mb.addTag({
+      feature, kind: 'planar',
+      normal: sweep > 0 ? mul3(capNormal, -1) : capNormal,
+      origin: opts.axisOrigin,
+    });
+    const endId = mb.addTag({
+      feature, kind: 'planar',
+      normal: sweep > 0 ? endNormal : mul3(endNormal, -1),
+      origin: opts.axisOrigin,
+    });
     capFace(mb, profile, plane, startId, sweep > 0);
 
     const endM = rotationAbout(opts.axisOrigin, axis, sweep);

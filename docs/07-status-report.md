@@ -29,7 +29,7 @@ would only prove the kernel is consistently wrong.
 | Area | Tests | What they establish |
 |---|---|---|
 | Geometry kernel | 75 | Exact predicates, linear algebra, NURBS, mass properties, booleans, construction |
-| Constraint solver | 37 | All 16 constraint types solve; all 16 Jacobians verified numerically; four states diagnosed |
+| Constraint solver | 37 | All 17 constraint types solve; all 17 Jacobians verified numerically; four states diagnosed |
 | Archetypes | 69 | Every shape closes; parameters traceable; engineering checks fire |
 | Drawings | 42 | Hidden lines separated, no mirroring, dimensions match geometry, DXF/SVG valid |
 | DXF import | 39 | Parsing, loop assembly, view recognition, reconstruction |
@@ -62,11 +62,11 @@ Roughly 11,000 lines of new, tested engine.
 - **`ops/boolean.ts`** — BSP boolean engine with coplanar handling and T-junction repair.
 - **`ops/modify.ts`** — shell, chain-based fillet and chamfer, holes with counterbore and
   countersink, patterns, mirror.
-- **`sketch/solver.ts`** — variational constraint solver, 16 constraint types.
+- **`sketch/solver.ts`** — variational constraint solver, 17 constraint types.
 - **`assembly/assembly.ts`** — instances, 7 mate types, mate solver, interference, BOM.
 
 ### Above the kernel
-- **`generate/`** — 15 parametric archetypes and a deterministic NL parser (units, imperial
+- **`generate/`** — 27 parametric archetypes and a deterministic NL parser (units, imperial
   fractions, ISO fastener designations, capacities, negations).
 - **`ingest/image/`** — Otsu threshold, Moore contour tracing with hole nesting,
   Douglas-Peucker, line/arc fitting, symmetry detection, scale calibration.
@@ -147,7 +147,7 @@ Stated in the product itself, not only here.
 
 | Item | Blocked by |
 |---|---|
-| **`DATUM.Kernel` has never been compiled** | Needs interop assemblies from a licensed SOLIDWORKS installation |
+| **`DATUM.Connector.SolidWorks` has never been compiled** | Needs interop assemblies from a licensed SOLIDWORKS installation |
 | Live SOLIDWORKS round-trip | Needs a seat |
 | Provider tests against real endpoints | Needs API keys |
 | Production code signing | Needs an EV certificate |

@@ -1,4 +1,6 @@
 import { useStore } from '../store';
+import { useModel } from '../modelStore';
+import { triCount } from '../engine';
 
 /**
  * The app's proof that it is actually connected and watching.
@@ -13,6 +15,18 @@ export function ContextBar() {
   const stale = useStore((s) => s.stale);
   const demo = useStore((s) => s.demo);
   const setTab = useStore((s) => s.setTab);
+
+  /*
+   * Standalone.
+   *
+   * With no connector there is no SOLIDWORKS document to be the context of, and the bar used
+   * to fill the gap with a fabricated one — a file path, a configuration and a mass belonging
+   * to no part on screen, sitting directly above the real part's mass in the status strip and
+   * disagreeing with it. "sample data" labelled the lie without stopping it being one.
+   *
+   * There *is* a document open in standalone: the DATUM part. So the bar reports that.
+   */
+  if (demo) return <StandaloneContext />;
 
   if (!ctx?.docPath) {
     return (
@@ -76,6 +90,52 @@ export function ContextBar() {
         )}
 
         <span className="pill">{ctx.massG.toFixed(1)} g</span>
+      </div>
+    </div>
+  );
+}
+
+
+/** The bar as it reads with no connector: the open DATUM part, measured off its own solid. */
+function StandaloneContext() {
+  const doc = useModel((s) => s.doc);
+  const evaluated = useModel((s) => s.evaluated);
+  const building = useModel((s) => s.building);
+
+  const modelled = triCount(evaluated.mesh) > 0;
+  /*
+   * The mass the evaluator already computed, not volume times one density.
+   *
+   * A single-material part has one density and the product is exact. An assembly does not: a
+   * gearbox is a steel case, two steel gears and bronze bushes, and weighing the merged solid
+   * at any one of those densities is simply wrong. Doing it here put 5773 g in the context bar
+   * beside the 3.09 kg the viewport reported for the same gearbox - two figures for one part,
+   * on the same screen. `massGrams` sums each component's own volume at its own density, which
+   * is why the document carries it.
+   */
+  const mass = evaluated.massGrams;
+
+  return (
+    <div className="ctx">
+      <div className="ctx-line">
+        <span className="doc" title="Modelled in DATUM — no CAD licence involved">
+          {modelled ? doc.name : 'No part yet'}
+        </span>
+        <span className="sep">·</span>
+        <span className="cfg">{doc.material}</span>
+        <span className="sep">·</span>
+        <span className="cfg">mm</span>
+      </div>
+
+      <div className="pills">
+        <span className="pill ok">standalone</span>
+        {building && <span className="pill">rebuilding…</span>}
+        {modelled && (
+          <span className="pill">
+            {doc.features.length} feature{doc.features.length === 1 ? '' : 's'}
+          </span>
+        )}
+        {modelled && <span className="pill">{mass.toFixed(1)} g</span>}
       </div>
     </div>
   );

@@ -21,26 +21,44 @@
  * to sign the drawing. A parts list with dimensions can.
  */
 
-import { complete, extractJson, type CompletionFailure, type ProviderConfig } from './providers';
+import {
+  complete, extractJson, providerInfo,
+  type CompletionFailure, type ProviderConfig, type RequestImage,
+} from './providers';
 import { ARCHETYPES, archetypeById } from '../generate/archetypes';
-import { generateFromText } from '../generate/parse';
+import { findMeasures, generateFromText } from '../generate/parse';
+import { applyModifiers, compose, readModifiers } from '../generate/compose';
+import { askForScript } from './scriptRoute';
+import { reviewBuild } from './review';
 import { matchRecipe, namesSpecificProduct, RECIPES } from '../assembly/recipes';
 import {
   buildAssembly, describePlan, shapeVocabulary, validatePlan,
   type AssemblyPlan,
 } from '../assembly/plan';
-import { addFeature, emptyDocument, type Document, type ParamValue } from '../model/document';
+import {
+  addFeature, emptyDocument, evaluateDocument, type Document, type ParamValue,
+} from '../model/document';
 import { constraintBrief } from '../lib/limits';
 import { exemplarBlock, exemplarsFor } from '../lib/training';
 import { expandQuery, referenceBlock } from '../reference/retrieve';
 import { auditPlan, summariseAudit, type Finding } from '../reference/audit';
 import { critique, repairPrompt, summariseCritique, type Critique } from './critique';
 import { reasonAbout, type Reasoning } from './reason';
+import { describeInspection, inspectDocument } from './inspect';
+import type { RequirementKind } from './requirements';
 import { describeChecks } from './requirements';
 
 export interface DecomposeSuccess {
   ok: true;
   doc: Document;
+  /**
+   * The DatumScript this was built from, when it was built from one.
+   *
+   * Kept so the part can be shown and edited as a program rather than only as a tree — and so
+   * a request that worked can be taught as an example of the language, which is what makes a
+   * corpus out of ordinary use.
+   */
+  script?: string;
   plan: AssemblyPlan | null;
   /** How it was decided, so the user knows whether a model was involved. */
   route: 'recipe' | 'catalogue' | 'model';
@@ -207,6 +225,29 @@ export interface DecomposeOptions {
   /** Force the model even when a recipe or catalogue entry would match. */
   preferModel?: boolean;
   signal?: AbortSignal;
+  /**
+   * Pictures of what is wanted, for a model that can see.
+   *
+   * Threaded through every model call this route makes, not only the first. A picture of a
+   * rotary kiln is not a picture of one part, so the study pass says ASSEMBLY and the plan
+   * route takes it — and the plan route asking "what are this object's components" while
+   * looking at a blank page is the whole failure this exists to prevent. The image goes with
+   * the question, wherever the question ends up.
+   */
+  images?: RequestImage[];
+  /**
+   * Build the parts that can be built, when some of the object cannot be.
+   *
+   * Off by default, and the default is right: answering "a turbine volute" with a cylinder is
+   * the one failure this application cannot afford, because nothing downstream detects it.
+   *
+   * But refusing *everything* because one component needs a surface the kernel has not got is a
+   * different mistake, and the user meets it as a flat no to a reasonable request. A car body
+   * needs class-A surfaces; its chassis, wheels, glass and lamps do not, and someone who imported
+   * a picture of a car would rather have those than nothing. So it is offered — never taken
+   * silently — and what was left out is named in the result.
+   */
+  allowPartial?: boolean;
 }
 
 export async function decompose(prompt: string, opts: DecomposeOptions): Promise<DecomposeResult> {
@@ -285,6 +326,30 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
 
     // 2. A single part from the catalogue.
     const single = generateFromText(text);
+
+    /*
+     * When the archetype read none of the sizes it was given.
+     *
+     * An archetype's parameters are its own, and a request can state a shape it recognises in
+     * words it does not: "a spacer 20 mm od 8 mm id 12 mm long" matches the washer, whose
+     * vocabulary has no "long", and came back at its default size — 0.11 cm³ against the
+     * 3.17 cm³ that was asked for, with three stated dimensions silently discarded.
+     *
+     * The composer has no such vocabulary problem, because it reads dimensions rather than
+     * matching them to a fixed schema. So when the archetype understood *nothing* dimensional
+     * from a request that plainly states dimensions, and the composer understood them, the
+     * composition is the better answer. The bar is deliberately at zero: an archetype that
+     * read even one of its sizes knows something about the request, and a named part beats a
+     * pile of primitives whenever it does.
+     */
+    const composedFirst = single.ok && preferComposition(single, text)
+      ? compose(text)
+      : { ok: false as const, reason: '' };
+
+    if (composedFirst.ok) {
+      return fromComposition(text, composedFirst, started);
+    }
+
     if (single.ok) {
       const archetype = single.archetype;
       const params: Record<string, ParamValue> = { archetypeId: archetype.id };
@@ -294,20 +359,51 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
 
       // The archetype's own material, so a wooden table is not costed as aluminium.
       const base = emptyDocument(archetype.label);
-      const doc = addFeature(
+      const built = addFeature(
         archetype.material
           ? { ...base, material: archetype.material.name, density: archetype.material.density }
           : base,
         'archetype', params, archetype.label,
       );
-      const understood = single.parsed.understood.length > 0
-        ? ` Read: ${single.parsed.understood.join(', ')}.`
+
+      /*
+       * Everything the archetype did not read.
+       *
+       * An archetype knows its own shape and nothing else, so a request for one carrying an
+       * operation it has no parameter for lost that operation entirely: "a hollow box
+       * 80 x 60 x 40 with 3 mm walls" came back solid at exactly 192.00 cm³, and "a 60 x 40 x 10
+       * block with an 8 mm hole" came back with no hole. Both reported success, which is the
+       * failure mode worth removing — the part measures right for what was built and wrong for
+       * what was asked.
+       *
+       * Only what the archetype did not already cover is added. A plate's own bolt holes stay
+       * the plate's business; a shell it has no concept of becomes a real shell feature.
+       */
+      const extra = readModifiers(text);
+
+      // What the archetype can build, not what the request happened to state. A plate builds
+      // bolt holes from its own defaults whether or not the sentence gave a diameter, so a
+      // second hole feature on top of them would drill the part twice.
+      const owned = new Set(archetype.defaults.map((d) => d.key));
+      const wanted = extra.modifiers.filter((m) => !COVERED[m.kind].some((k) => owned.has(k)));
+
+      const doc = wanted.length > 0 ? applyModifiers(built, wanted, acrossOf(single)) : built;
+
+      const readParts = [
+        ...single.parsed.understood,
+        ...wanted.map((m) => m.describe),
+      ];
+      const understood = readParts.length > 0 ? ` Read: ${readParts.join(', ')}.` : '';
+
+      const ignored = extra.unhandled.length > 0
+        ? ` Not built, because there is no operation for it: ${extra.unhandled.join('; ')}.`
         : '';
 
       const reasoned = reasonAbout(
         text, doc,
         `Recognised a ${archetype.label.toLowerCase()} in the built-in catalogue and sized it ` +
         'from the request.',
+        { built: boundDimensions(single) },
       );
 
       return {
@@ -317,7 +413,7 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
         route: 'catalogue',
         reasoning: reasoned.reasoning,
         message: [
-          `Built a ${archetype.label.toLowerCase()}.${understood}`,
+          `Built a ${archetype.label.toLowerCase()}.${understood}${ignored}`,
           single.result.warnings.join(' '),
           describeChecks(reasoned.reasoning.checks),
         ].filter(Boolean).join(' ').trim(),
@@ -332,14 +428,38 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
     }
   }
 
+  /*
+   * 2b. Composed from primitives.
+   *
+   * The catalogue is a finite list of named parts. This is not: it reads a request as a shape
+   * and the operations performed on it, which covers the parts a shop actually makes one-off —
+   * spacers, bushes, standoffs, mounting blocks, plates with pockets — none of which is worth
+   * an archetype and all of which are worth building.
+   *
+   * After the catalogue, because a named archetype knows more about its own shape than a
+   * composition of primitives ever can: a cup gets a handle and a gear gets involute teeth.
+   */
+  if (!opts.preferModel) {
+    const composed = compose(text);
+    if (composed.ok) return fromComposition(text, composed, started);
+  }
+
   // 3. A model.
   if (opts.config.id === 'none') {
+    // The parser already worked out *why* it could not answer — which noun it does not have,
+    // and which shapes are nearest. Quoting "nothing matches your request" over the top of
+    // that throws away the only part of the answer a user can act on.
+    const attempt = generateFromText(text);
+    const why = attempt.ok ? '' : attempt.message;
+
     return {
       ok: false,
-      message:
-        `Nothing in the built-in catalogue matches "${text}". ` +
-        `Configure a model in AI settings to decompose objects that are not in the list, ` +
-        `or try one of the shapes below.`,
+      message: why
+        ? `${why} Or configure a model in AI settings, which can decompose objects that are ` +
+          `not in the catalogue into parts that are.`
+        : `Nothing in the built-in catalogue matches "${text}". ` +
+          `Configure a model in AI settings to decompose objects that are not in the list, ` +
+          `or try one of the shapes below.`,
       suggestions: starterSuggestions(),
     };
   }
@@ -375,6 +495,99 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
   //
   // This helps every model and helps the smaller ones most, which is where the problem was.
   const study = await studyObject(opts, reference, text);
+
+  /*
+   * 3a. One part, written as a program.
+   *
+   * The plan route below decomposes a request into components, each of which must name a
+   * shape from the catalogue — so its ceiling is the catalogue's. A crankshaft is not in it,
+   * and a decomposition of a crankshaft into cylinders is not a crankshaft.
+   *
+   * A script has no such ceiling. Every statement still names a feature the kernel implements
+   * and every argument is still checked against that feature's own schema — a script that
+   * could not be built does not parse — but the combinations are unbounded. The model is
+   * limited by what the language can say rather than by what somebody thought to add to a
+   * list, which is the difference between raising the ceiling and removing it.
+   *
+   * Routed on the study's own verdict rather than on a keyword rule: nothing about the words
+   * says that a gearbox is an assembly and a crankshaft is not, and the pass that has just
+   * worked out what the object is knows. When there is no study — the call failed, or none
+   * was made — the plan route runs, which is what happened before this existed.
+   */
+  /*
+   * The study's own verdict that nothing here can express the shape.
+   *
+   * Refusing is the answer, and it is the same answer the offline routes give: naming what is
+   * missing is more use than a solid that is the right volume and the wrong object. A part
+   * returned as correct when it is not is the one failure mode this application cannot afford,
+   * because nothing downstream can detect it — the mass is real, the drawing dimensions it,
+   * and the manufacturability rules pass it.
+   */
+  const unbuildable = study ? readUnbuildable(study) : null;
+
+  /**
+   * What the caller chose to go ahead without.
+   *
+   * Set only when the study said no *and* the caller asked to build anyway. It travels all the
+   * way to the message, because a partial build is honest exactly as long as its limits do.
+   */
+  const omitted = unbuildable && opts.allowPartial ? unbuildable : null;
+
+  if (unbuildable && !opts.allowPartial) {
+    return {
+      ok: false,
+      message:
+        `This cannot be built here, and building the nearest thing to it would give you a ` +
+        `part you did not ask for. ${unbuildable} ` +
+        `The shapes available are: ${BUILDABLE_VOCABULARY}.`,
+      suggestions: starterSuggestions(),
+    };
+  }
+
+  if (study && /\bMAKE\b[^A-Za-z]{0,12}ONE-PART/i.test(study)) {
+    const scripted = await askForScript(text, {
+      config: opts.config, signal: opts.signal, reference, exemplars, images: opts.images,
+      // Look at the finished part before accepting it. `reviewBuild` declines gracefully when
+      // the provider has no eyes, so this costs nothing where it cannot be spent.
+      look: providerInfo(opts.config.id).supportsImages,
+    });
+
+    if (!('assembly' in scripted) && scripted.ok) {
+      const reasoned = reasonAbout(text, scripted.doc, scripted.message);
+
+      /*
+       * Looked at as geometry, not only as a description.
+       *
+       * `reasonAbout` checks the result against what was asked — the dimensions the request
+       * stated. That leaves everything the request did *not* state: a boss floating clear of the
+       * face it belongs on, a component turned 89.4°, a part swallowed inside another. None of
+       * those contradict any requirement, and all of them are visible in a second's looking.
+       */
+      const inspected = inspectDocument(scripted.doc, evaluateDocument(scripted.doc));
+      const looked = describeInspection(inspected);
+
+      return {
+        ok: true,
+        doc: reasoned.doc,
+        plan: null,
+        route: 'model',
+        reasoning: reasoned.reasoning,
+        message: [scripted.message, describeChecks(reasoned.reasoning.checks), looked]
+          .filter(Boolean).join(' ').trim(),
+        corrections: [],
+        dropped: [],
+        citations: [],
+        findings: [],
+        inspected: [],
+        repaired: scripted.repairs > 0,
+        ms: Date.now() - started,
+        script: scripted.source,
+      };
+    }
+
+    // A script the model could not make build is not a reason to give up on the request: the
+    // plan route may still answer it, more coarsely, and a coarse answer beats none.
+  }
 
   let attempt = await askForPlan(
     opts, reference, exemplars,
@@ -454,12 +667,45 @@ export async function decompose(prompt: string, opts: DecomposeOptions): Promise
 
   parts.push(`Built by ${reply.model} in ${(reply.ms / 1000).toFixed(1)} s.`);
 
+  /*
+   * Look at the assembly too.
+   *
+   * The script route already does this. The plan route did not, and it is the one that
+   * answered a request for a turbine volute with three cylinders — every check it ran passed,
+   * because every check it ran read a description. A part that measures correctly and is not
+   * the thing asked for is invisible to a bounding box and obvious in a picture.
+   *
+   * Reported, not refused. An assembly that a reviewer objects to is still worth handing over
+   * with the objection attached: the user can see both, which is more than either alone. The
+   * objection also clears `satisfied`, so it surfaces as a warning rather than as success.
+   */
+  const looked = providerInfo(opts.config.id).supportsImages
+    ? await reviewBuild(text, reasoned.doc, { config: opts.config, signal: opts.signal })
+    : undefined;
+
+  if (looked?.verdict === 'wrong') {
+    parts.push(`Looking at it, this is not right: ${looked.notes.join('; ')}.`);
+  }
+
+  /*
+   * What was knowingly left out, said in the result and not only at the moment of asking.
+   *
+   * A partial build is honest exactly as long as its limits travel with it. Said once in a
+   * dialog and dropped, this becomes a car with no body panels that the user is told is a car —
+   * which is the failure the refusal existed to prevent, arrived at from the other direction.
+   */
+  if (omitted) {
+    parts.push(`Built without the parts this kernel cannot express: ${omitted}`);
+  }
+
   return {
     ok: true,
     doc: reasoned.doc,
     plan,
     route: 'model',
-    reasoning: reasoned.reasoning,
+    reasoning: looked?.verdict === 'wrong'
+      ? { ...reasoned.reasoning, satisfied: false }
+      : reasoned.reasoning,
     message: parts.join(' '),
     corrections: validated.corrections,
     dropped: validated.dropped,
@@ -492,10 +738,47 @@ type PlanAttempt =
  * usually still produce a plan, and losing the request entirely because the *optional* pass
  * failed would be a worse outcome than a plainer model.
  */
+
+/**
+ * The shapes this system can make, in one line, for the study to judge against.
+ *
+ * Deliberately coarse. The study is deciding whether an object's *form* is expressible, not
+ * writing the part, and handing it the full parameter schema would invite it to reason about
+ * arguments instead of about shape.
+ */
+const BUILDABLE_VOCABULARY = [
+  'extrusions and revolutions of closed profiles',
+  'lofts between two sections',
+  'sweeps of a constant section along a path',
+  'boxes, cylinders, spheres and cones',
+  'boolean add, cut and intersect',
+  'holes, pockets, slots, ribs, shells, draft, domes',
+  'constant-radius fillets and chamfers',
+  'linear, circular and mirrored patterns',
+].join('; ');
+
+
+/**
+ * The study's buildability verdict, or null when it did not object.
+ *
+ * Conservative by construction: only an explicit NO refuses. A study that omitted the heading,
+ * hedged, or came back unparseable lets the request through to the routes below, because
+ * losing a buildable part to a misread heading is worse than building one that should have
+ * been declined — the second is visible and the first is not.
+ */
+export function readUnbuildable(study: string): string | null {
+  const m = /\bBUILDABLE\b[^A-Za-z]{0,12}(YES|NO)\b([^\n]*)/i.exec(study);
+  if (!m || m[1]!.toUpperCase() !== 'NO') return null;
+
+  const because = (m[2] ?? '').replace(/^[\s—:,.-]+/, '').trim();
+  return because.length > 0 ? because : 'Its shape needs an operation this kernel does not have.';
+}
+
 async function studyObject(
   opts: DecomposeOptions, reference: string, text: string,
 ): Promise<string | undefined> {
   const reply = await complete(opts.config, {
+    ...(opts.images ? { images: opts.images } : {}),
     system:
       `You are a mechanical engineer identifying an object so it can be modelled in CAD.\n\n` +
       (reference ? `${reference}\n\n` : '') +
@@ -508,7 +791,39 @@ async function studyObject(
       `where it sits. Be exhaustive at the level a person would point at and name. For a car ` +
       `that means body panels, glass, wheels, tyres, lights, bumpers, mirrors, seats, and the ` +
       `major mechanical units — not "body" and "wheels".\n\n` +
-      `UNCERTAIN — anything you are guessing at.`,
+      `UNCERTAIN — anything you are guessing at.\n\n` +
+      // One extra line, no extra round trip. The pass that is already working out what the
+      // object *is* is the one best placed to say whether it is one part or several, and
+      // asking a separate call to decide would be paying twice to think once.
+      `MAKE — exactly one of the words ONE-PART or ASSEMBLY. ONE-PART if this is a single ` +
+      `piece of material, however complicated its shape: a crankshaft, a housing, a bracket, ` +
+      `an impeller. ASSEMBLY if it is separate pieces made individually and fitted together.` +
+      `\n\n` +
+      /*
+       * Whether the shape can be expressed at all.
+       *
+       * Measured, not assumed: with a model configured, a request for a hydroformed turbine
+       * volute with variable-section runners came back as three cylinders and a closed solid.
+       * Offline that request is refused by name; the decomposition route asks a model to break
+       * an object into components, and a model asked to decompose complies. The result was a
+       * 300 cm³ part that is not a turbine volute, returned as though it were.
+       *
+       * That is the failure this whole application is built to avoid, so the pass that already
+       * knows what the object is has to answer it. The criterion is deliberately about *shape*
+       * and not about difficulty: everything below is a real feature the kernel implements, and
+       * a form that needs something not on the list cannot be built here however hard anyone
+       * tries.
+       */
+      `BUILDABLE — exactly one of the words YES or NO, then one sentence.\n` +
+      `The only shapes this system can make are combinations of these operations:\n` +
+      `  ${BUILDABLE_VOCABULARY}\n` +
+      `Answer YES if the object's real form is a combination of those — most machined, turned, ` +
+      `moulded and fabricated parts are. Answer NO only when the shape is *defined* by ` +
+      `something not on that list: a variable-section or freeform surface, an aerofoil, a ` +
+      `class-A body panel, a volute or scroll whose cross-section changes along its path, a ` +
+      `blended organic form. After NO, name the missing capability in one sentence. Do not ` +
+      `answer NO because a part is complicated or has many features; answer NO because the ` +
+      `shape cannot be said in those words.`,
     user: `Identify and break down: ${text}`,
     maxTokens: 1600,
     signal: opts.signal,
@@ -523,6 +838,9 @@ async function askForPlan(
   opts: DecomposeOptions, reference: string, exemplars: string, user: string,
 ): Promise<PlanAttempt> {
   const reply = await complete(opts.config, {
+    // The picture goes with the question. A plan route asked what an object is made of,
+    // while looking at nothing, answers about nothing.
+    ...(opts.images ? { images: opts.images } : {}),
     system: buildSystemPrompt(reference, exemplars),
     user,
     // A car or an engine is 25 to 60 components, and each carries a name, a role, six
@@ -622,3 +940,113 @@ export function catalogue(): { assemblies: string[]; parts: string[] } {
 
 void archetypeById;
 void shapeVocabulary;
+
+/**
+ * Archetype parameters that already express each operation.
+ *
+ * If the request stated one of these, the archetype has the instruction and adding a feature
+ * for it as well would apply it twice — a plate would get its own bolt holes and a second
+ * hole on top of them.
+ */
+const COVERED: Record<string, string[]> = {
+  hole: ['holeDia', 'holesPerLeg', 'boltCount', 'boltDia', 'boreDia'],
+  fillet: ['filletRadius', 'cornerRadius', 'rimFillet'],
+  chamfer: ['chamfer'],
+  shell: ['wall', 'wallThickness', 'baseThickness'],
+  pocket: [],
+  slot: [],
+};
+
+/** The archetype's smallest horizontal size, for placing a hole pattern inside it. */
+function acrossOf(single: Extract<ReturnType<typeof generateFromText>, { ok: true }>): number {
+  const p = single.parsed.params;
+  const candidates = ['width', 'length', 'outerDia', 'bodyDia', 'diameter', 'acrossFlats']
+    .map((k) => p[k])
+    .filter((v): v is number => typeof v === 'number' && v > 0);
+
+  return candidates.length > 0 ? Math.min(...candidates) : 0;
+}
+
+/** A composed part, as a decomposition result. Shared by both places composition can win. */
+function fromComposition(
+  text: string,
+  composed: Extract<ReturnType<typeof compose>, { ok: true }>,
+  started: number,
+): DecomposeSuccess {
+  const reasoned = reasonAbout(
+    text, composed.doc, `Read the request as ${composed.understood.join(', ')}.`,
+  );
+
+  const ignored = composed.unhandled.length > 0
+    ? ` Not built, because there is no operation for it: ${composed.unhandled.join('; ')}.`
+    : '';
+
+  const count = composed.doc.features.length;
+
+  return {
+    ok: true,
+    doc: reasoned.doc,
+    plan: null,
+    route: 'catalogue',
+    reasoning: reasoned.reasoning,
+    message: [
+      `Built it from ${count} feature${count === 1 ? '' : 's'}. ` +
+      `Read: ${composed.understood.join(', ')}.${ignored}`,
+      describeChecks(reasoned.reasoning.checks),
+    ].filter(Boolean).join(' ').trim(),
+    corrections: [],
+    dropped: [],
+    citations: [],
+    findings: [],
+    inspected: [],
+    repaired: false,
+    ms: Date.now() - started,
+  };
+}
+
+/**
+ * Whether a composition beats the archetype the catalogue matched.
+ *
+ * Two cases, and both are about the archetype knowing less than it appears to.
+ *
+ * A **primitive** archetype — box, cylinder, sphere — is a bare solid with no design content
+ * at all, so there is nothing the composer can lose by replacing it and a good deal to gain:
+ * the archetype's parser binds a dimension only to a keyword, so "a 50 mm cylinder 80 mm long"
+ * left the diameter on its default, while the composer reads the 50 that sits in front of the
+ * noun. Anything with real content in it — a cup's handle, a gear's involute teeth — keeps
+ * priority, because a named part beats a pile of primitives every time.
+ *
+ * The second case is an archetype that read **none** of the sizes it was given, which means
+ * the request stated them in words its schema does not have. Then the sizes are the only thing
+ * anyone said, and the answer that uses them is the better one.
+ */
+function preferComposition(
+  single: Extract<ReturnType<typeof generateFromText>, { ok: true }>,
+  text: string,
+): boolean {
+  if (single.archetype.category === 'primitive') return true;
+  return single.parsed.understood.length === 0 && findMeasures(text).length >= 2;
+}
+
+/**
+ * Which stated dimensions the archetype actually bound to one of its parameters.
+ *
+ * Read off `understood`, which the parser writes one entry into per parameter it filled from
+ * the request — so this is a record of what was built to on purpose, not a guess about it.
+ */
+function boundDimensions(
+  single: Extract<ReturnType<typeof generateFromText>, { ok: true }>,
+): RequirementKind[] {
+  const out = new Set<RequirementKind>();
+
+  for (const phrase of single.parsed.understood) {
+    const word = phrase.split('=')[0]!.trim().toLowerCase();
+
+    if (/\b(long|length)\b/.test(word)) out.add('length');
+    if (/\b(wide|width)\b/.test(word)) out.add('width');
+    if (/\b(tall|high|height|thick|thickness|deep|depth)\b/.test(word)) out.add('height');
+    if (/\b(od|id|dia|diameter|bore|across)\b/.test(word)) out.add('diameter');
+  }
+
+  return [...out];
+}

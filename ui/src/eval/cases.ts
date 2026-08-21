@@ -47,6 +47,40 @@ export interface Expectation {
   massG?: [number, number];
   /** The geometric inspection must find nothing it calls an error. */
   noCritiqueErrors?: boolean;
+
+  /**
+   * Volume in mm³, as a range computed by hand from the request.
+   *
+   * The check that catches an operation being *dropped*. A block asked to be hollow that comes
+   * back solid has the right envelope, the right mass for what was built, and the wrong part —
+   * and every dimensional assertion above passes. Only the volume moves.
+   */
+  volumeMm3?: [number, number];
+
+  /**
+   * Feature kinds the tree must contain.
+   *
+   * Volume proves material went missing; this proves it went missing *as the operation that
+   * was asked for*, and that the result is still editable rather than a fused lump. A hole the
+   * user can reopen and resize is the difference between a CAD model and a mesh.
+   */
+  featureKinds?: string[];
+
+  /**
+   * Strings that must appear in the drawing generated from the solid.
+   *
+   * A dimension in the drawing is the number the shop cuts to, so it has to be the number the
+   * request stated — not the one the model rounded to after a rebuild.
+   */
+  drawingHas?: string[];
+
+  /**
+   * A manufacturability rule that must fire on this part.
+   *
+   * Asserted the same way as everything else here: the geometry is chosen so that a published
+   * limit is unambiguously breached, and the rule that names it must be the one that fires.
+   */
+  blockerRule?: string;
 }
 
 export interface EvalCase {
@@ -173,6 +207,160 @@ export const CASES: EvalCase[] = [
       'answer; approximating it with the nearest archetype would be the serious failure.',
     deterministic: true,
     expect: { builds: false },
+  },
+
+  // ── composition: the operation asked for actually happens ──
+  //
+  // Each volume below is arithmetic anyone can redo on paper, and each is the check that
+  // catches the failure the archetype route used to have: the right envelope, the right mass
+  // for what was built, and every dimensional assertion passing on a part that had silently
+  // lost what was asked of it.
+  {
+    id: 'compose-hollow-box',
+    prompt: 'a hollow box 80 x 60 x 40 with 3 mm walls',
+    basis:
+      'Solid it would be 192 000 mm³. Shelled 3 mm with an open top, the void is ' +
+      '74 × 54 × 37 = 147 852 mm³, leaving about 44 000 mm³. The band allows for which faces ' +
+      'the shell opens; a solid result is far outside it either way.',
+    deterministic: true,
+    expect: {
+      builds: true, closed: true,
+      volumeMm3: [20000, 60000],
+      featureKinds: ['shell'],
+    },
+  },
+  {
+    id: 'compose-block-hole',
+    prompt: 'a 60 x 40 x 10 block with an 8 mm hole in the middle',
+    basis:
+      '60 × 40 × 10 = 24 000 mm³ less a ⌀8 hole through 10 mm, π × 4² × 10 = 503 mm³. ' +
+      'A tessellated cylinder under-runs its true volume slightly, so the hole removes a ' +
+      'little less than 503.',
+    deterministic: true,
+    expect: {
+      builds: true, closed: true,
+      volumeMm3: [23440, 23530],
+      featureKinds: ['hole'],
+    },
+  },
+  {
+    id: 'compose-cylinder-bore',
+    prompt: 'a 50 mm cylinder 80 mm long with a 12 mm hole through it',
+    basis:
+      'π × 25² × 80 = 157 080 mm³ less π × 6² × 80 = 9 048 mm³, so 148 032 mm³. Both are ' +
+      'tessellated and run low by well under a percent at default quality.',
+    deterministic: true,
+    expect: {
+      builds: true, closed: true,
+      volumeMm3: [145000, 148100],
+      featureKinds: ['cylinder', 'hole'],
+    },
+  },
+  {
+    id: 'compose-square-bar',
+    prompt: 'a 100 mm long bar 20 mm square with 5 mm chamfers',
+    basis:
+      '"20 mm square" states both cross-section dimensions: 100 × 20 × 20 = 40 000 mm³, less ' +
+      'the chamfers. Read as a single width the bar comes out 100 × 100 × 20, which is five ' +
+      'times the material and the failure this case exists to catch.',
+    deterministic: true,
+    expect: {
+      builds: true, closed: true,
+      sizeMm: [100, 20, 20], sizeTol: 0.02,
+      volumeMm3: [32000, 40000],
+      featureKinds: ['chamfer'],
+    },
+  },
+  {
+    id: 'compose-bushing',
+    prompt: 'a 25 mm bushing 40 mm long with a 15 mm bore',
+    basis:
+      'π(12.5² − 7.5²) × 40 = 12 566 mm³. A bushing is not in the catalogue, so this is the ' +
+      'composed route answering a request the archetype list cannot.',
+    deterministic: true,
+    expect: {
+      builds: true, closed: true,
+      sizeMm: [40, 25, 25], sizeTol: 0.03,
+      volumeMm3: [12200, 12580],
+    },
+  },
+
+  // ── refusal: the property that separates this from a system that always answers ──
+  //
+  // A CAD tool that answers the wrong question confidently is worse than one that answers
+  // nothing, because the user has no signal that the solid on screen is not their part. Each
+  // of these names a part the catalogue does not have and the composer cannot build, and each
+  // was previously answered with the nearest archetype: a crankshaft with a plain cylinder, a
+  // ball bearing with a sphere, a cap screw with a knob.
+  {
+    id: 'refuse-crankshaft',
+    prompt: 'a crankshaft for a 4 cylinder engine',
+    basis: 'The head noun is "crankshaft". The "cylinder" belongs to a subordinate clause.',
+    deterministic: true,
+    expect: { builds: false },
+  },
+  {
+    id: 'refuse-bearing',
+    prompt: 'a ball bearing 6205',
+    basis: 'The head noun is "bearing"; "ball" is a compound modifier, and a sphere is not one.',
+    deterministic: true,
+    expect: { builds: false },
+  },
+  {
+    id: 'refuse-capscrew',
+    prompt: 'a socket head cap screw M6 x 20',
+    basis: 'English compounds are head-final: this is a screw, not a socket and not a head.',
+    deterministic: true,
+    expect: { builds: false },
+  },
+  {
+    id: 'refuse-turbine',
+    prompt: 'a turbine blade with a twisted aerofoil',
+    basis: 'No archetype, and a twisted aerofoil is not a primitive with operations on it.',
+    deterministic: true,
+    expect: { builds: false },
+  },
+
+  // ── the drawing states what the request stated ──
+  {
+    id: 'drawing-dimensions',
+    prompt: 'a 150 x 90 x 12 plate',
+    basis:
+      'A drawing is what the shop cuts to, so its dimensions have to be the ones asked for. ' +
+      'The figures are the request; the tolerance class is ISO 2768-m, which this project ' +
+      'did not choose.',
+    deterministic: true,
+    expect: {
+      builds: true, closed: true,
+      sizeMm: [150, 90, 12], sizeTol: 0.02,
+      drawingHas: ['150.0', '90.0', '12.0'],
+    },
+  },
+
+  // ── manufacturability fires on geometry that breaches a published limit ──
+  {
+    id: 'dfm-thin-wall',
+    prompt: 'a hollow box 80 x 60 x 40 with 0.4 mm walls',
+    basis:
+      '0.4 mm is below the 0.8 mm floor for a machined wall — thinner than that chatters away ' +
+      'from the cutter in aluminium and will not hold tolerance in steel at all. The rule ' +
+      'that names it must be the one that fires.',
+    deterministic: true,
+    expect: {
+      builds: true,
+      blockerRule: 'dfm.mill.min-wall',
+    },
+  },
+
+  // ── units ──
+  {
+    id: 'capacity-bottle',
+    prompt: 'a 500 ml bottle',
+    basis:
+      'A bottle sized by capacity has to hold it. 500 ml of water is 500 g, and a 500 ml ' +
+      'vessel is 60–90 mm across and 180–260 mm tall whatever else it is.',
+    deterministic: true,
+    expect: { builds: true, closed: true, largestMm: 220, sizeTol: 0.35 },
   },
 ];
 

@@ -3,6 +3,7 @@ import { useModel } from '../modelStore';
 import { appearanceFor, fallbackColour, parseHex } from '../lib/appearance';
 import { measureFaces } from '../lib/measure';
 import { buildFaceGraph } from '../kernel/topo/facegraph';
+import { SketchEditor } from './SketchEditor';
 import { Viewport3D } from './Viewport3D';
 import { triCount } from '../kernel/topo/mesh';
 import type { Document } from '../model/document';
@@ -121,7 +122,7 @@ export function ModelViewport() {
   const select = useModel((s) => s.select);
   const selectedFaces = useModel((s) => s.selectedFaces);
   const toggleFace = useModel((s) => s.toggleFace);
-  const place = useModel((s) => s.place);
+  const nudge = useModel((s) => s.nudge);
   const rebuilding = useModel((s) => s.building);
   const addScoped = useModel((s) => s.addScoped);
   const sketchOnFace = useModel((s) => s.sketchOnFace);
@@ -129,6 +130,10 @@ export function ModelViewport() {
   const ribOnFace = useModel((s) => s.ribOnFace);
   const remove = useModel((s) => s.remove);
   const pushPull = useModel((s) => s.pushPull);
+  const addFeature = useModel((s) => s.addFeature);
+  const edit = useModel((s) => s.edit);
+  const setParams = useModel((s) => s.setParams);
+  const editing = useModel((s) => s.doc.features.find((f) => f.id === s.editingFeatureId));
 
   const faceScopeMode = useModel((s) => {
     const f = s.doc.features.find((x) => x.id === s.editingFeatureId);
@@ -175,9 +180,20 @@ export function ModelViewport() {
     const owner = face >= 0 ? evaluated.faceOwner.get(face) : undefined;
     const feature = owner ? doc.features.find((f) => f.id === owner) : undefined;
     const picked = selectedFaces.length;
-
     const scoped = picked > 0 ? selectedFaces : face >= 0 ? [face] : [];
+    const hasModel = triCount(evaluated.mesh) > 0;
 
+    /*
+     * Everything a face can be the subject of.
+     *
+     * Six of twenty-four features used to be reachable here, which meant the viewport was for
+     * looking and the toolbar was for working. A menu that offers what you can do to *the thing
+     * you just clicked* is the difference between the two.
+     *
+     * Grouped the way the operations divide: what to do with the faces you picked, what to
+     * build on the face under the pointer, what to do to the whole part, and what to do to the
+     * feature that made this face.
+     */
     return [
       {
         label: picked > 1 ? `Round these ${picked} faces` : 'Round this face',
@@ -200,14 +216,45 @@ export function ModelViewport() {
         run: () => sketchOnFace(face, 'sketch'),
       },
       {
+        label: 'Extrude from this face',
+        disabled: face < 0,
+        run: () => sketchOnFace(face, 'extrude'),
+      },
+      {
         label: 'Rib on this face',
         disabled: face < 0,
         run: () => ribOnFace(face),
       },
       {
-        label: 'Extrude from this face',
+        label: 'Pocket into this face',
         disabled: face < 0,
-        run: () => sketchOnFace(face, 'extrude'),
+        run: () => addFeature('pocket'),
+      },
+      {
+        label: 'Slot into this face',
+        disabled: face < 0,
+        run: () => addFeature('slot'),
+      },
+      {
+        label: 'Dome this face',
+        disabled: face < 0,
+        run: () => addFeature('dome'),
+      },
+
+      // Whole-part operations. They do not need a face, only something to act on.
+      { label: 'Shell the part', disabled: !hasModel, run: () => addFeature('shell') },
+      { label: 'Draft the walls', disabled: !hasModel, run: () => addFeature('draft') },
+      { label: 'Split into two bodies', disabled: !hasModel, run: () => addFeature('split') },
+      { label: 'Wrap a pattern around it', disabled: !hasModel, run: () => addFeature('wrap') },
+      { label: 'Mirror the part', disabled: !hasModel, run: () => addFeature('mirror') },
+      { label: 'Repeat in a line', disabled: !hasModel, run: () => addFeature('patternLinear') },
+      { label: 'Repeat around a circle', disabled: !hasModel, run: () => addFeature('patternCircular') },
+      { label: 'Add a datum plane', run: () => addFeature('datum') },
+
+      {
+        label: feature ? `Edit ${feature.name}` : 'Edit feature',
+        disabled: !feature,
+        run: () => { if (feature) edit(feature.id); },
       },
       {
         label: feature ? `Delete ${feature.name}` : 'Delete feature',
@@ -220,8 +267,8 @@ export function ModelViewport() {
         run: () => toggleFace(-1, false),
       },
     ];
-  }, [doc, evaluated.faceOwner, selectedFaces, addScoped, sketchOnFace, drillOnFace,
-      ribOnFace, remove, toggleFace]);
+  }, [doc, evaluated.faceOwner, evaluated.mesh, selectedFaces, addScoped, sketchOnFace,
+      drillOnFace, ribOnFace, addFeature, edit, remove, toggleFace]);
 
   /*
    * The status line shows the measurement while faces are picked, and the part's own figures
@@ -231,22 +278,52 @@ export function ModelViewport() {
    * both on screen at once is a row of eleven numbers nobody reads. What you picked a face to
    * find out is the more urgent of the two for as long as the face is picked.
    */
+  /*
+   * The exact figures replace the tessellated ones once the part has been rebuilt exactly.
+   *
+   * Marked as exact rather than quietly swapped, because the whole reason to have asked is that
+   * the two differ — a 10 mm hole reads 9.94 in one and 10.00 in the other, and which you are
+   * looking at decides whether the number can carry a tolerance.
+   */
+  const exact = useModel((s) => s.exact);
+
   const status = measurement
     ? [
         { label: measurement.subject, value: '' },
         ...measurement.lines.map((l) => ({ label: l.label.toLowerCase(), value: l.value })),
       ]
-    : [
-        { label: 'mass', value: hasModel ? formatMass(evaluated.massGrams) : '—' },
-        { label: 'vol', value: hasModel ? formatVolume(evaluated.volume) : '—' },
-        { label: 'tri', value: triCount(evaluated.mesh).toLocaleString() },
-        { label: 'build', value: `${evaluated.rebuildMs} ms` },
-        { label: 'solid', value: hasModel ? (evaluated.health.closed ? 'closed' : 'OPEN') : '—' },
-      ];
+    : exact
+      ? [
+          { label: 'exact vol', value: formatVolume(exact.volume) },
+          { label: 'area', value: `${(exact.area / 100).toFixed(2)} cm²` },
+          { label: 'faces', value: String(exact.faces) },
+          { label: 'tri', value: triCount(exact.mesh).toLocaleString() },
+          { label: 'kernel', value: 'exact' },
+        ]
+      : [
+          { label: 'mass', value: hasModel ? formatMass(evaluated.massGrams) : '—' },
+          { label: 'vol', value: hasModel ? formatVolume(evaluated.volume) : '—' },
+          { label: 'tri', value: triCount(evaluated.mesh).toLocaleString() },
+          { label: 'build', value: `${evaluated.rebuildMs} ms` },
+          { label: 'solid', value: hasModel ? (evaluated.health.closed ? 'closed' : 'OPEN') : '—' },
+        ];
 
-  return (
+  /*
+   * The sketch is drawn over the viewport, not beside it.
+   *
+   * It was only ever in the feature panel: click Sketch and the tools appeared in a column on
+   * the far side of the window from the part they belong to. That is where the editor was
+   * easiest to mount and it is not where anyone looks for it — you sketch *on the model*, and
+   * a user who selects the sketch tool and finds nothing in the viewport concludes, reasonably,
+   * that sketching does not work.
+   *
+   * The same component, unchanged, docked over the 3D view. The part stays visible behind it,
+   * which is the other half of why it belongs here: a sketch is nearly always drawn in relation
+   * to geometry that already exists.
+   */
+  const view = (
     <Viewport3D
-      mesh={evaluated.mesh}
+      mesh={exact ? exact.mesh : evaluated.mesh}
       edges={evaluated.edges}
       fitKey={doc.id}
       faceOwner={evaluated.faceOwner}
@@ -261,18 +338,44 @@ export function ModelViewport() {
       faceNormals={faceNormals}
       menuActions={menuActions}
       onMovePart={(dx, dy, dz) => {
-        // Resolved against the document rather than accumulated in the viewport, so a drag and
-        // a typed coordinate are the same edit and cannot drift apart.
-        const f = doc.features.find((x) => x.id === selectedFeatureId);
-        if (!f) return;
-        const at = f.placement ?? { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
-        place(f.id, { x: at.x + dx, y: at.y + dy, z: at.z + dz });
+        // Added by the store against the live document, not read-and-set from this render's
+        // copy of it: a drag emits pointer events faster than React re-renders, and every
+        // frame in one batch would otherwise start from the same stale placement.
+        if (selectedFeatureId) nudge(selectedFeatureId, { x: dx, y: dy, z: dz });
+      }}
+      onRotatePart={(drx, dry, drz) => {
+        if (selectedFeatureId) nudge(selectedFeatureId, { rx: drx, ry: dry, rz: drz });
       }}
       faceScopeMode={faceScopeMode}
       status={status}
       rebuilding={rebuilding}
     />
   );
+
+  if (editing?.kind === 'sketch') {
+    return (
+      <div className="mv-sketching">
+        {view}
+
+        <div className="mv-sketch-pane">
+          <div className="mv-sketch-head">
+            <strong>{editing.name}</strong>
+            <span>Draw a closed outline. Click a line or a circle to dimension it.</span>
+            <button type="button" onClick={() => edit(null)} title="Close the sketch (Esc)">
+              Done
+            </button>
+          </div>
+
+          <SketchEditor
+            value={typeof editing.params.sketch === 'string' ? editing.params.sketch : ''}
+            onChange={(json) => setParams(editing.id, { sketch: json })}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return view;
 }
 
 function formatMass(g: number): string {

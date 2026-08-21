@@ -16,7 +16,7 @@ env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
 
 jobs:
-  # DATUM.Kernel is deliberately absent from this job. It references the SOLIDWORKS
+  # DATUM.Connector.SolidWorks is deliberately absent from this job. It references the SOLIDWORKS
   # interop assemblies, which ship with the product and are not redistributable, so it
   # cannot build on a hosted runner. DATUM.NoSolidWorks.slnf is the buildable subset —
   # and it happens to contain the entire safety model minus the COM calls.
@@ -68,7 +68,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Attempt kernel build
-        run: dotnet build src/DATUM.Kernel/DATUM.Kernel.csproj -c Release
+        run: dotnet build src/DATUM.Connector.SolidWorks/DATUM.Connector.SolidWorks.csproj -c Release
 
   ui:
     name: UI
@@ -103,6 +103,37 @@ jobs:
       # `npm run build` runs `tsc --noEmit` first, so strict TypeScript is gating.
       - name: Typecheck and build
         run: npm run build
+
+      # The headless surface, built and exercised.
+      #
+      # It is what makes the product checkable by anything other than a person: a part can be
+      # built, measured and gated in CI, a folder can be run in one pass, and an agent can
+      # drive it and read the evidence back. A build that compiles but whose CLI cannot run a
+      # script is a surface nobody can rely on.
+      - name: Headless build
+        run: npm run cli
+
+      - name: Headless smoke test
+        run: |
+          printf 'box Body length=120 width=80 height=10\nhole Bore diameter=20 holeType=through pattern=single x=0 y=0\n' > /tmp/smoke.datum
+          node dist-cli/datum.mjs run /tmp/smoke.datum --json
+          node dist-cli/datum.mjs dfm /tmp/smoke.datum --json
+          node dist-cli/datum.mjs export /tmp/smoke.datum --out /tmp/smoke.step
+          node dist-cli/datum.mjs corpus --count 20 --seed 1 --out /tmp/corpus.jsonl --json
+
+      # Every figure this project states about itself, regenerated and compared.
+      #
+      # Five documents here once stated five different test counts, five different archetype
+      # counts and three different constraint counts — every one of them true on the day it
+      # was typed. In a technical review a stale count does not read as staleness; it reads as
+      # a claim that did not survive checking, and it puts every other claim in the document
+      # in question. So no number is maintained by hand, and a commit that changes one without
+      # regenerating fails here.
+      - name: Facts are current
+        run: |
+          npm run facts
+          git diff --exit-code ../docs/FACTS.md \
+            || (echo "::error::docs/FACTS.md is out of date — run 'npm --prefix ui run facts'" && exit 1)
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4

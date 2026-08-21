@@ -27,14 +27,29 @@ import { featuresFromPrismatic, fitPrismatic } from './ingest/fit/prismatic';
 import {
   describeRack, designRack, measurePart, type RackDesign, type RackOptions,
 } from './domain/anodizing';
+import {
+  designBarRackFor, describeBarRack, type BarRackDesign,
+} from './domain/barRack';
+import { runScript } from './generate/script';
 import { billOfMaterials, type AssemblyPlan, type BomLine } from './assembly/plan';
 import { halfProfile, symmetricBothWays, traceImage, type RasterImage } from './ingest/image/trace';
-import { reliefFromImage } from './ingest/image/relief';
+import { reliefFromImage, type Relief } from './ingest/image/relief';
+import { depthToRelief, type DepthSource } from './ingest/image/depth';
+import { foregroundMask } from './ingest/image/trace';
+import { classifySubject, type SubjectVerdict } from './ingest/image/subject';
+import { reconstructFromImage } from './ingest/drawing/fromImage';
+import { encodeImage, mediaTypeOf } from './ai/images';
+import { providerInfo } from './ai/providers';
+
 import { buildFaceGraph } from './kernel/topo/facegraph';
 import { faceBoundary } from './kernel/topo/boundary';
 import { planeFrom } from './kernel/ops/build';
 import { type Vec3 } from './kernel/math/vec';
-import { type Reasoning } from './ai/reason';
+import { type Mesh } from './kernel/topo/mesh';
+import { reasonAboutEdit, type Reasoning } from './ai/reason';
+import { applyEdit, readEdit } from './ai/edit';
+import { askForEdit } from './ai/editRoute';
+import { describeChecks } from './ai/requirements';
 import { readDxf } from './ingest/drawing/dxf';
 import { readStep } from './ingest/step/read';
 import { importDrawing } from './ingest/drawing/reconstruct';
@@ -92,6 +107,14 @@ interface ModelState {
   plan: AssemblyPlan | null;
   /** The steps the last build took, and whether it met what was asked. */
   reasoning: Reasoning | null;
+  /**
+   * The part as the exact kernel built it, when it has been asked for.
+   *
+   * Alongside the tessellated model rather than replacing it: the feature tree is still the
+   * document, and every edit rebuilds the mesh as before. This is a view for measuring and
+   * exporting.
+   */
+  exact: { mesh: Mesh; volume: number; area: number; faces: number } | null;
 
   /**
    * Questions waiting to be answered before a part is built.
@@ -136,6 +159,10 @@ interface ModelState {
   addFeature: (kind: FeatureKind) => void;
   /** Pushes or pulls a flat face along its normal, as a new extrude feature. */
   pushPull: (faceId: number, distance: number) => { ok: boolean; message: string };
+  /** Rebuilds the open part through OpenCascade, loading it on first use. */
+  makeExact: () => Promise<{ ok: boolean; message: string }>;
+  /** Drops back to the tessellated model. */
+  clearExact: () => void;
   /** Adds a fillet or chamfer already scoped to the given faces. */
   addScoped: (kind: FeatureKind, faces: number[]) => void;
   /** Drills a hole at the centre of a picked face. */
@@ -148,6 +175,17 @@ interface ModelState {
   rename: (id: string, name: string) => void;
   /** Moves or turns a part. Absolute, in millimetres and degrees. */
   place: (id: string, delta: Partial<Placement>) => void;
+  /**
+   * Adds to a feature's placement, resolved against the current document.
+   *
+   * `place` sets; this adds. The difference matters for anything driven by a drag: a caller
+   * that reads the placement, adds its delta and calls `place` is working from whatever the
+   * document was when that caller last rendered, and a drag emits pointer events faster than
+   * React re-renders. Several frames in one batch all read the same starting value and each
+   * overwrites the last, so the part travels the distance of one frame rather than the sum —
+   * lagging the pointer under exactly the fast drag where it is most obvious.
+   */
+  nudge: (id: string, delta: Partial<Placement>) => void;
   remove: (id: string) => void;
   toggleSuppressed: (id: string) => void;
   move: (id: string, delta: number) => void;
@@ -177,7 +215,58 @@ interface ModelState {
   /** Abandons the questions without building. */
   cancelPending: () => void;
   bom: () => BomLine[];
-  importImage: (image: RasterImage, mmPerPixel: number, thickness: number) => { ok: boolean; message: string };
+  /**
+   * Builds a part from a picture.
+   *
+   * Only from a picture of a *flat part*, which is what tracing an outline can honestly
+   * recover. An image of a three-dimensional thing is refused and said so, with what was
+   * measured — see `ingest/image/subject.ts`. `force` overrules that judgement for the case it
+   * gets wrong: a flat part under a hard raking light can spread its tones like a solid.
+   */
+  importImage: (
+    image: RasterImage, mmPerPixel: number, thickness: number, force?: boolean,
+    /**
+     * A height field already measured, when something better than shading produced it.
+     *
+     * Internal: `importImageWithDepth` reads one from a depth model and hands it in, so the
+     * whole rest of the pipeline — trace, outline, feature, solid — stays one code path with
+     * one source of truth about how a picture becomes a part.
+     */
+    measured?: Relief,
+  ) => { ok: boolean; message: string; subject?: SubjectVerdict };
+
+  /**
+   * Builds from a picture, reading its depth with a model rather than from its shading.
+   *
+   * The same pipeline in every other respect — the same trace, the same outline, the same
+   * feature, the same solid — with the height field coming from a monocular depth model instead
+   * of from shape from shading. Shading is solved under a strong assumption, one light on one
+   * matte surface, and it gives up on anything textured, shiny or side-lit. A depth model was
+   * trained on photographs of real things and does not need the assumption.
+   *
+   * Explicit, and not what an ordinary import does, because it downloads tens of megabytes of
+   * weights the first time. Spending someone's bandwidth without asking is not a default.
+   */
+  importImageWithDepth: (
+    image: RasterImage, mmPerPixel: number, thickness: number, depth: DepthSource,
+  ) => Promise<{ ok: boolean; message: string }>;
+
+  /**
+   * Builds a part from a picture by having a model look at it.
+   *
+   * The other half of the answer to "image to 3D". Tracing an outline recovers a flat shape and
+   * nothing else: the depth of a machine seen in perspective is simply not in its silhouette,
+   * and no better tracer will find it there. What is in the picture is the shading, the way the
+   * cylinders foreshorten, the fact that those four boxes are piers — and reading that is what a
+   * vision model does.
+   *
+   * Requires a model that can actually see. Sending an image to one that cannot is refused
+   * rather than dropped, because a model answering about a picture it never received writes a
+   * confident description of nothing.
+   */
+  buildFromImage: (
+    bytes: Uint8Array, mediaType: string, note?: string, allowPartial?: boolean,
+  ) => Promise<{ ok: boolean; message: string; partial?: boolean }>;
   importDxf: (text: string) => { ok: boolean; message: string };
   /**
    * Reads a STEP file as a solid.
@@ -289,10 +378,41 @@ interface ModelState {
   designRackForPart: (options?: RackOptions) => { ok: boolean; message: string };
   /** The last rack designed, so the UI can show its numbers and checks. */
   rackDesign: RackDesign | null;
+  /**
+   * The last bar-and-clip rack designed, when that is the architecture the part called for.
+   *
+   * Kept separately rather than folded into `rackDesign` because the two are different racks,
+   * not two settings of one: a spine with arms is sized by current and cooling, and a 100-0132
+   * bar with spot-welded clips is sized by how many stations fit across a fixed span. Sharing
+   * a shape would mean inventing fields each one has to leave empty, and a panel full of
+   * blanks is how a reader learns to stop reading it.
+   */
+  barRackDesign: BarRackDesign | null;
   /** Saves the current document under a name, replacing any part already using it. */
   saveToLibrary: (name: string) => { ok: boolean; message: string };
   openFromLibrary: (name: string) => { ok: boolean; message: string };
   removeFromLibrary: (name: string) => { ok: boolean; message: string };
+}
+
+/**
+ * Whether a request is "design the rack for what is open".
+ *
+ * Two things have to be true and both matter. The sentence has to be about a rack for
+ * *anodising* — a rack is also a shelf, a gear rack and a server rack, and only one of those is
+ * measured off the part on screen. And it has to point at that part: "this", "it", "the part",
+ * or simply "for" with something open. Without the second test, "an anodising rack" typed into
+ * an empty document would take the same branch and design a rack for nothing.
+ */
+export function wantsRackForOpenPart(text: string, hasPart: boolean): boolean {
+  if (!hasPart) return false;
+
+  const lower = ` ${text.toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+
+  const rack = / rack /.test(lower);
+  const plating = /(anodis|anodiz|plating|electroplat)/.test(lower);
+  const pointsHere = /( this | it | that | current | open | imported | the part | my part )/.test(lower);
+
+  return rack && plating && pointsHere;
 }
 
 const HISTORY_LIMIT = 60;
@@ -371,6 +491,7 @@ export const useModel = create<ModelState>((set, get) => ({
   reuse: null,
   lastRequest: null,
   rackDesign: null,
+  barRackDesign: null,
   editingFeatureId: null,
   undoStack: [],
   redoStack: [],
@@ -379,6 +500,7 @@ export const useModel = create<ModelState>((set, get) => ({
   ai: loadConfig(),
   plan: null,
   reasoning: null,
+  exact: null,
 
   /*
    * Commit a document that has just been imported, and open what it made.
@@ -531,6 +653,59 @@ export const useModel = create<ModelState>((set, get) => ({
           : `${feature.name} now applies to ${selectedFaces.length} selected face${selectedFaces.length === 1 ? '' : 's'}.`,
       },
     });
+  },
+
+  /**
+   * Rebuilds the open part through the exact kernel.
+   *
+   * Loaded on demand and never at startup — see `kernel/brep/load.ts` for why 66 MB of
+   * WebAssembly is opt-in. The import is dynamic so the bundler keeps it out of the main chunk
+   * and nobody who does not use it ever downloads it.
+   *
+   * The result replaces what the viewport draws but *not* the feature tree, which stays the
+   * parametric document it was. Exact geometry is a view of the model for measuring and
+   * exporting, not a different model — converting the tree into one would trade every parameter
+   * for one snapshot of the shape.
+   */
+  async makeExact() {
+    set({ notice: { tone: 'info', text: 'Loading the exact-geometry kernel. 66 MB, once.' } });
+
+    try {
+      const { exactFromDocument } = await import('./kernel/brep/fromDocument');
+      const result = await exactFromDocument(get().doc);
+
+      if (!result) {
+        const message =
+          'Nothing in this part has an exact counterpart yet. Boxes, cylinders, spheres, the '
+          + 'boolean operations and fillets convert; sweeps, lofts and traced reliefs do not.';
+        set({ notice: { tone: 'warn', text: message } });
+        return { ok: false, message };
+      }
+
+      set({
+        exact: {
+          mesh: result.mesh,
+          volume: result.volume,
+          area: result.area,
+          faces: result.faces,
+        },
+        notice: {
+          tone: result.dropped.length > 0 || result.problem ? 'warn' : 'info',
+          text: result.message,
+        },
+      });
+
+      return { ok: true, message: result.message };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'The exact kernel could not be loaded.';
+      set({ notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+  },
+
+  /** Goes back to the tessellated model, which is what every edit rebuilds. */
+  clearExact() {
+    set({ exact: null });
   },
 
   addFeature(kind) {
@@ -788,6 +963,22 @@ export const useModel = create<ModelState>((set, get) => ({
     get().commit(placeFeature(get().doc, id, delta), `move ${feature.name} ${axis}`);
   },
 
+  nudge(id, delta) {
+    const feature = get().doc.features.find((f) => f.id === id);
+    if (!feature) return;
+
+    const at = feature.placement ?? { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
+    // Only the axes the caller named, added to what is there now.
+    const sum: Partial<Placement> = {};
+    for (const key of ['x', 'y', 'z', 'rx', 'ry', 'rz'] as const) {
+      const by = delta[key];
+      if (typeof by === 'number') sum[key] = (at[key] ?? 0) + by;
+    }
+
+    const axis = Object.keys(delta)[0] ?? 'position';
+    get().commit(placeFeature(get().doc, id, sum), `move ${feature.name} ${axis}`);
+  },
+
   rename(id, name) {
     get().commit(renameFeature(get().doc, id, name), 'rename');
   },
@@ -870,6 +1061,25 @@ export const useModel = create<ModelState>((set, get) => ({
       // the request did not already say. "Make a cup 90 mm tall" has been specified; asking
       // about it would be an obstacle, and an early version that asked every time broke a
       // dozen tests by refusing to build anything without a dialogue first.
+      /*
+       * "Make an anodising rack for this part", said in words.
+       *
+       * The button has always been there and the sentence never worked: it fell through to the
+       * build route, which answered a request about the part on screen by replacing it with a
+       * generic rack from the catalogue. Somebody who has just imported a customer's lid and
+       * asks for its rack gets a rack for nothing in particular, and loses the lid.
+       *
+       * Checked before the model is reached for, because this needs no model at all — the rack
+       * is measured off the solid that is open. Only when something *is* open, and only when the
+       * sentence points at it: "an anodising rack" on an empty document is a request to build a
+       * rack, which the catalogue answers perfectly well.
+       */
+      if (wantsRackForOpenPart(prompt, get().doc.features.length > 0)) {
+        const designed = get().designRackForPart();
+        set({ building: false, lastRequest: prompt });
+        return { ok: designed.ok, message: designed.message };
+      }
+
       const single = generateFromText(prompt);
       const asks = single.ok
         && single.archetype.asksFirst
@@ -898,6 +1108,87 @@ export const useModel = create<ModelState>((set, get) => ({
               + nearMissNote,
           };
         }
+      }
+
+      /*
+       * An edit to what is open beats a fresh build.
+       *
+       * Checked first, and only ever true when there is something to edit and the sentence
+       * names part of it. "A gearbox" is a new request even with a gearbox on screen; "make the
+       * base plate 20 mm thick" is not, and building a second bracket in answer to it is the
+       * behaviour that made the assistant feel like a demo rather than a tool.
+       */
+      /*
+       * A model-written edit, when the sentence is plainly a change and plainly beyond a rule.
+       *
+       * `readEdit` below handles the phrasings a regular expression can catch — rename,
+       * suppress, "make X 20 mm thick" — offline and exactly, and it keeps them. This is the
+       * rest, and the rest was the problem: anything it could not parse fell through to a fresh
+       * build, so "make the shell longer and add a third pier" threw away the kiln and built a
+       * new one. An assistant that answers a correction by starting over is one nobody dares
+       * talk to about work they care about.
+       *
+       * The route returns the part *changed* rather than replaced, refuses a reply that rewrote
+       * everything, and says which lines moved — so a change can be read before it is kept.
+       */
+      const hasModel = get().ai.id !== 'none';
+      if (hasModel && get().doc.features.length > 0 && !readEdit(prompt, get().doc)) {
+        const edited = await askForEdit(prompt, get().doc, { config: get().ai });
+
+        /*
+         * A model that never answered has not had its say.
+         *
+         * Every other outcome here is the model's judgement — it rewrote too much, it wrote a
+         * script that would not parse, it decided the request was about something else. A
+         * provider failure is none of those: no key, no network, or a free tier spent. Treated
+         * like a refusal it stops the request dead, and a part the offline catalogue could have
+         * built in a hundred milliseconds is lost to an expired API key.
+         *
+         * So it falls through to the route it would have taken had no model been configured.
+         */
+        if (!('newPart' in edited) && !edited.providerFailed) {
+          if (edited.ok) {
+            get().commit(edited.doc, 'edit');
+            set({
+              lastRequest: prompt,
+              building: false,
+              notice: { tone: 'info', text: edited.message },
+            });
+            return { ok: true, message: edited.message };
+          }
+
+          set({ building: false, notice: { tone: 'warn', text: edited.message } });
+          return { ok: false, message: edited.message };
+        }
+        // `newPart`: the model judged this to be about something else, so it falls through to
+        // the build route exactly as it would have before.
+      }
+
+      const edit = readEdit(prompt, get().doc);
+      if (edit) {
+        const applied = applyEdit(get().doc, edit);
+
+        if (!applied.ok) {
+          set({ notice: { tone: 'warn', text: applied.message }, building: false });
+          return { ok: false, message: applied.message };
+        }
+
+        // Checked, but never rescaled. An edit already says what to change and to what, and
+        // the correction pass exists to resize a part that came out the wrong size — applying
+        // it here overrules the instruction with a different reading of the same sentence.
+        const reasoned = reasonAboutEdit(prompt, applied.doc, applied.message);
+
+        get().commit(reasoned.doc, applied.message);
+        set({
+          lastRequest: prompt,
+          reasoning: reasoned.reasoning,
+          notice: {
+            tone: reasoned.reasoning.satisfied ? 'info' : 'warn',
+            text: `${applied.message} ${describeChecks(reasoned.reasoning.checks)}`.trim(),
+          },
+        });
+
+        return { ok: true, message: applied.message };
       }
 
       const result = await decompose(prompt, { config: get().ai });
@@ -1059,7 +1350,232 @@ export const useModel = create<ModelState>((set, get) => ({
     get().rebuild(doc);
   },
 
-  importImage(image, mmPerPixel, thickness) {
+  async buildFromImage(bytes, mediaType, note, allowPartial = false) {
+    const config = get().ai;
+    const type = mediaTypeOf(mediaType);
+
+    if (!type) {
+      const message = `${mediaType} is not an image any provider will read. Use PNG, JPEG or WebP.`;
+      set({ notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+
+    if (config.id === 'none' || !providerInfo(config.id).supportsImages) {
+      const message = config.id === 'none'
+        ? 'Reading a picture of a machine needs a model that can see. Choose one under the model button.'
+        : `${providerInfo(config.id).label} cannot read images. Choose a model that can see.`;
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message };
+    }
+
+    set({ building: true, notice: { tone: 'info', text: 'Reading the image…' } });
+
+    try {
+      /*
+       * Through the same route a typed request takes, with the picture attached.
+       *
+       * Not straight to the script route. That route writes *one part*, so a picture of a
+       * kiln — which is a shell, its tyres, its piers and a stack — made it answer ASSEMBLY,
+       * and asking for a single part was the end of the road: the importer refused, the model
+       * refused, and the user was told twice that their image was several things without either
+       * refusal ever leading anywhere.
+       *
+       * `decompose` already knows what to do with several things. It studies the object, decides
+       * one part or an assembly, and takes the branch that fits — and now it can see the picture
+       * at every step, including the plan route, which is the branch a machine actually needs.
+       */
+      const result = await decompose(
+        note?.trim() || 'Model the object shown in the image.',
+        {
+          config,
+          preferModel: true,
+          allowPartial,
+          images: [encodeImage(bytes, type, 'the object to model')],
+        },
+      );
+
+      if (!result.ok || !result.doc) {
+        /*
+         * A refusal that names an unbuildable *part* of the object is not the end of it.
+         *
+         * "The exterior body panels require class-A freeform surfaces" is a true statement about
+         * one component of a car, and answering it by building nothing throws away the chassis,
+         * the wheels, the glass and the lamps — every one of which this kernel makes perfectly
+         * well. Reported as a partial that can be asked for, rather than as a flat no.
+         */
+        const partial = !allowPartial && /require|not supported|cannot be expressed/i
+          .test(result.message);
+
+        set({ building: false, notice: { tone: 'warn', text: result.message } });
+        return { ok: false, message: result.message, partial };
+      }
+
+      get().commit(result.doc, 'build from image');
+      const message = `${result.message} Check the dimensions — a picture carries no scale.`;
+
+      set({
+        building: false,
+        plan: result.plan ?? null,
+        selectedFeatureId: result.doc.features[0]?.id ?? null,
+        notice: { tone: 'info', text: message },
+      });
+      return { ok: true, message };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      set({ building: false, notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+  },
+
+  async importImageWithDepth(image, mmPerPixel, thickness, depth) {
+    set({ building: true, notice: { tone: 'info', text: `Reading depth with ${depth.name}…` } });
+
+    try {
+      const read = await depth.estimate(image);
+      const reading = depthToRelief(
+        read.depth, read.width, read.height, foregroundMask(image), depth.name,
+      );
+
+      if (!reading) {
+        const message =
+          `${depth.name} found no variation in depth across the part, so there is no surface to `
+          + 'recover. It has been built as a flat outline instead.';
+        set({ building: false });
+        const flat = get().importImage(image, mmPerPixel, thickness, true);
+        return { ok: flat.ok, message: `${flat.message} ${message}` };
+      }
+
+      /*
+       * Forced past the subject check, deliberately.
+       *
+       * The check exists because *tracing* cannot read a picture of a solid. Reading depth with a
+       * model is the thing it was telling the user to go and do, so applying it here would refuse
+       * the very request it recommended.
+       */
+      set({ building: false });
+      const built = get().importImage(image, mmPerPixel, thickness, true, reading.relief);
+
+      return {
+        ok: built.ok,
+        message: `${built.message} Depth read by ${depth.name}`
+          + `${reading.inverted ? ' (read as metric depth and flipped)' : ''}. `
+          + 'A picture carries no scale, so check the size and the depth.',
+      };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      set({ building: false, notice: { tone: 'error', text: message } });
+      return { ok: false, message };
+    }
+  },
+
+  importImage(image, mmPerPixel, thickness, force = false, measured) {
+    /*
+     * What kind of picture is this, before anything is built from it.
+     *
+     * The importer used to trace whatever it was given. Handed a perspective render of a rotary
+     * kiln — cylinder on piers, stack, half a building in frame — it found the outline of the
+     * whole scene and extruded it into a slab shaped like that outline: closed, manifold,
+     * dimensioned, and not a kiln. Nothing downstream objected, because everything downstream
+     * asks whether the solid is sound rather than whether it is the thing the user imported.
+     *
+     * The tracer is not at fault and is not changed. It says plainly what it is for — a flat
+     * shape, square on — and it does that well. What was missing was anyone checking that it
+     * was being handed one.
+     */
+    const subject = classifySubject(image, foregroundMask(image));
+
+    /*
+     * A drawing is reconstructed from its views, not traced and not handed to a model.
+     *
+     * Three orthographic views each say "the material lies inside this outline, seen along this
+     * axis". Extruding each along its own axis and intersecting the three gives the largest solid
+     * consistent with all of them — which for a prismatic part is not an approximation but the
+     * part. That machinery already existed and had only ever been reachable from a DXF; a
+     * photograph or a scan of the same drawing, which is how most drawings actually arrive, had
+     * no way in at all.
+     *
+     * Tried before the model, because it is exact, offline, free, and returns geometry rather
+     * than a description. The model stays as the answer for the sheets this cannot read — one
+     * view, a perspective illustration, a drawing whose views do not line up.
+     *
+     * Tried on any sheet that is not a flat part, not only on one the classifier called line
+     * work. Whether a picture *is* a multi-view drawing is settled by whether its views line up,
+     * which this finds out by looking; line weight is a weaker signal and a filled silhouette
+     * drawing is still a drawing. It costs a trace on a photograph that will fail the two-view
+     * test immediately, which is cheaper than the model call it saves.
+     */
+    if (subject.subject !== 'flat-part' && !force) {
+      const read = reconstructFromImage(image, { mmPerPixel });
+
+      if (!('error' in read)) {
+        // Carried as an imported body, exactly as a STEP is: the reconstruction is a mesh, and
+        // pretending it is a feature tree would offer parameters that drive nothing.
+        const doc = addFeature(
+          emptyDocument('Drawing'), 'imported',
+          { __mesh: read.result.mesh as unknown as ParamValue, operation: 'place' },
+          'Reconstructed from views',
+        );
+
+        get().commitImported(doc, 'read drawing');
+
+        const roles = read.views.map((v) => v.role).join(', ');
+
+        /*
+         * A one-view reading is a plate, and it says so.
+         *
+         * Three views that agree fix all three dimensions; one view fixes two and leaves the
+         * third to a default. Both are useful and only one of them is a measurement, so the
+         * difference is stated rather than left in the number — a thickness presented like the
+         * other two is a guess wearing their clothes.
+         */
+        const message = read.singleView
+          ? `${read.message} Read from one view at ${mmPerPixel.toFixed(3)} mm per pixel. `
+            + 'One view fixes the outline and says nothing about thickness, so the thickness is a '
+            + 'default — set it on the feature, along with the size.'
+          : `${read.message} Read from ${read.views.length} view`
+            + `${read.views.length === 1 ? '' : 's'} (${roles}) at ${mmPerPixel.toFixed(3)} mm per `
+            + 'pixel — a picture carries no scale, so check the size.';
+
+        set({
+          barRackDesign: null,
+          rackDesign: null,
+          plan: null,
+          notice: {
+            tone: read.result.caveats.length > 0 ? 'warn' : 'info',
+            text: [message, ...read.result.caveats].join(' '),
+          },
+        });
+
+        return { ok: true, message, subject };
+      }
+      // Falls through to the refusal below, which offers the model — the right answer for a
+      // sheet whose views this could not find.
+    }
+
+    if (subject.subject !== 'flat-part' && !force) {
+      /*
+       * A drawing and a scene are refused for the same reason and it is worth saying differently.
+       *
+       * A photograph of a machine has depth the outline cannot carry. A *drawing* has no depth at
+       * all to trace: what it has is several views of one object, and the answer is in reading
+       * them together — which is a different job from tracing, and the reason the earlier message
+       * about "the silhouette of the whole photograph" read as nonsense on a blueprint. It was
+       * also literally what happened: the whole sheet, every view and the word MARKINGS, extruded
+       * 7 mm thick.
+       */
+      const message = subject.subject === 'drawing'
+        ? `${subject.reason} Tracing it would extrude the whole sheet — every view, every leader `
+          + 'line — as one flat outline. A drawing has to be read rather than traced: use a model '
+          + 'that can see the image, or import one view of one flat part on its own.'
+        : `${subject.reason} Tracing an outline can only build a flat part from a picture, so `
+          + 'this would come out as a slab shaped like the silhouette of the whole photograph. '
+          + 'Use a model that can see the image, or import a square-on view of one flat part — '
+          + 'or say to trace it anyway if it really is flat.';
+
+      set({ notice: { tone: 'warn', text: message } });
+      return { ok: false, message, subject };
+    }
+
     const traced = traceImage(image, { mmPerPixel });
     if ('error' in traced) {
       set({ notice: { tone: 'error', text: traced.error } });
@@ -1100,8 +1616,16 @@ export const useModel = create<ModelState>((set, get) => ({
      * from, means we are looking at a face rather than a profile, and the measured relief wins
      * over the assumed revolution.
      */
-    const relief = reliefFromImage(image, traced.profile.outer, traced.profile.holes, mmPerPixel);
-    const readable = relief !== null
+    /*
+     * A relief measured by a model beats one solved from shading, and is trusted without the
+     * three shading tests: they ask whether *shape from shading* had anything to work with, and
+     * a depth model does not infer from shading at all. Applying them would throw away a good
+     * reconstruction for failing a test that is not about it.
+     */
+    const relief = measured ?? reliefFromImage(
+      image, traced.profile.outer, traced.profile.holes, mmPerPixel,
+    );
+    const readable = measured !== undefined || relief !== null
       && relief.shading > 0.08
       && relief.obliquity < 0.35
       && relief.reliefRatio > 0.002;
@@ -1578,6 +2102,50 @@ export const useModel = create<ModelState>((set, get) => ({
     // Measured now, while the part is still the model. `commit` below replaces the document
     // with the rack, and an area read afterwards would be the rack's own.
     const part = measurePart(evaluated.mesh, doc.density);
+
+    /*
+     * Which rack this part wants.
+     *
+     * Two architectures, and the part decides. A bar-and-clip rack — one 100-0132 titanium bar
+     * with Grade 4 clips spot-welded across it — is what an anodising shop runs for anything
+     * that hangs off a clip, and it is the one grounded in a real rack library. It cannot carry
+     * a part too thick for a clip to close on, or one too deep for the tank the bar was drawn
+     * for, and for those the spine-and-arm rack is right.
+     *
+     * Asked rather than assumed: the bar design is run first and its own blocking checks decide.
+     * A rule written here in terms of dimensions would be a second opinion about the same
+     * question, kept in a different file, drifting.
+     */
+    const bar = designBarRackFor(part, {
+      processId: options.process,
+      thicknessUm: options.thicknessUm,
+    });
+
+    if (!bar.checks.some((c) => !c.ok && c.severity === 'blocker')) {
+      const script = runScript(bar.script);
+      if (script.ok) {
+        const built: Document = {
+          ...script.doc,
+          name: `Rack for ${doc.name}`,
+          material: bar.bar.material,
+        };
+
+        get().commit(built, 'design rack');
+
+        const message = describeBarRack(bar);
+        set({
+          barRackDesign: bar,
+          rackDesign: null,
+          plan: null,
+          selectedFeatureId: built.features[0]?.id ?? null,
+          editingFeatureId: built.features[0]?.id ?? null,
+          notice: { tone: 'info', text: message },
+        });
+
+        return { ok: true, message };
+      }
+    }
+
     const design = designRack(part, options);
 
     const archetype = archetypeById('rack')!;
@@ -1597,6 +2165,7 @@ export const useModel = create<ModelState>((set, get) => ({
     const message = describeRack(design);
     set({
       rackDesign: design,
+      barRackDesign: null,
       plan: null,
       selectedFeatureId: rackDoc.features[0]?.id ?? null,
       editingFeatureId: rackDoc.features[0]?.id ?? null,

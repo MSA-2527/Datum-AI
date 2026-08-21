@@ -30,7 +30,8 @@ import {
   circleProfile, makeProfile, polygonProfile, rectProfile, slotProfile, type Profile,
 } from '../kernel/sketch/profile';
 import {
-  XY, XZ, YZ, box, cone, cylinder, extrude, loft, planeFrom, revolve, sphere, sweep, type Plane,
+  XY, XZ, YZ, box, cone, cylinder, extrude, loft, planeFrom, profileCrossesAxis, revolve, sphere,
+  sweep, type Plane,
 } from '../kernel/ops/build';
 import { interpolateCurve, lineToNurbs, type NurbsCurve } from '../kernel/math/nurbs';
 import { boolean, subtractAll } from '../kernel/ops/boolean';
@@ -50,7 +51,7 @@ export type FeatureKind =
   | 'box' | 'cylinder' | 'sphere'
   | 'sketch'
   | 'extrude' | 'revolve' | 'loft' | 'sweep'
-  | 'rib' | 'draft' | 'dome' | 'split' | 'datum' | 'wrap'
+  | 'rib' | 'draft' | 'dome' | 'split' | 'datum' | 'wrap' | 'sheet'
   | 'hole' | 'pocket' | 'slot'
   | 'fillet' | 'chamfer' | 'shell'
   | 'patternLinear' | 'patternCircular' | 'mirror'
@@ -158,6 +159,15 @@ export interface Document {
    * it is an override.
    */
   knownMassGrams?: number;
+  /**
+   * Release metadata: part number, revision, vendor, finish.
+   *
+   * Not geometry, and deliberately free-form. It exists because the manufacturability rules
+   * already check for it - a quote package without a part number is rejected by suppliers,
+   * and `dfm.metadata.required` says so - but there was nowhere on the document to put it, so
+   * the finding could be read and never acted on. It also fills the drawing's title block.
+   */
+  properties?: Record<string, string>;
   features: Feature[];
   /**
    * The design's driving dimensions.
@@ -168,6 +178,14 @@ export interface Document {
    * on it moving when it changes.
    */
   globals: { name: string; value: number | string; units: string; note?: string }[];
+  /**
+   * Named sets of parameter values, for a family of parts in one document.
+   *
+   * Optional so that every document written before configurations existed still reads. See
+   * `model/configurations.ts` for why a configuration carries parameters and suppression and
+   * deliberately nothing else.
+   */
+  configurations?: { active: string; list: unknown[] };
   /**
    * Relationships between components, which drive their placements.
    *
@@ -305,7 +323,7 @@ interface FeatureResult {
  * a bare name can say "this is the wheelbase" but only an expression can say "this is half of
  * it", and half of it is what a placement actually needs.
  */
-function num(doc: Document, params: Record<string, ParamValue>, key: string, fallback: number): number {
+export function num(doc: Document, params: Record<string, ParamValue>, key: string, fallback: number): number {
   return readNumber(params[key], parametersOf(doc), fallback).value;
 }
 
@@ -641,6 +659,41 @@ function tappingDrill(nominal: number): number {
   return Math.max(0.5, nominal - pitch);
 }
 
+/** How much of a flange a bend consumes, measured to the outside of the corner. */
+function setbackOf(angle: number, radius: number, thickness: number): number {
+  return (radius + thickness) * Math.tan(Math.abs(rad(angle)) / 2);
+}
+
+/**
+ * A closed outline around a centreline, at a constant half-width.
+ *
+ * Up one side and back the other, which is what a constant-thickness section is. The normals are
+ * taken from the segment on each side of a vertex and averaged, so the thickness holds through a
+ * corner instead of pinching on the inside of it.
+ */
+function ribbon(path: Vec2[], half: number): Vec2[] {
+  if (path.length < 2) return [];
+
+  const normals: Vec2[] = path.map((_, i) => {
+    const before = path[Math.max(0, i - 1)]!;
+    const after = path[Math.min(path.length - 1, i + 1)]!;
+
+    const dx = after[0] - before[0];
+    const dy = after[1] - before[1];
+    const len = Math.hypot(dx, dy) || 1;
+    return [-dy / len, dx / len];
+  });
+
+  const left: Vec2[] = path.map((pt, i) => [
+    pt[0] + normals[i]![0] * half, pt[1] + normals[i]![1] * half,
+  ]);
+  const right: Vec2[] = path.map((pt, i) => [
+    pt[0] - normals[i]![0] * half, pt[1] - normals[i]![1] * half,
+  ]);
+
+  return [...left, ...right.reverse()];
+}
+
 function planeOf(name: string): Plane {
   switch (name) {
     case 'XZ': case 'front': return XZ;
@@ -774,9 +827,30 @@ export function applyFeature(current: Mesh, f: Feature, doc: Document): FeatureR
       const profile = profileFrom(p, doc);
       if (!profile) return { error: 'This feature has no profile to revolve.' };
 
-      const solid = revolve(profile, planeOf(str(p, 'plane', 'XZ')), {
-        axisOrigin: [0, 0, 0],
-        axisDir: [0, 0, 1],
+      const plane = planeOf(str(p, 'plane', 'XZ'));
+      const axisOrigin: Vec3 = [0, 0, 0];
+      const axisDir: Vec3 = [0, 0, 1];
+
+      /*
+       * A section that straddles the axis cannot be revolved, and has to be told so.
+       *
+       * The material on the far side sweeps through the same space as the material on the near
+       * side, wound the other way, and the two cancel. What comes out is closed, manifold, and
+       * has zero volume — a shape the viewport draws happily, the mass properties weigh at
+       * nothing, and no downstream check objects to, because every one of them asks whether the
+       * mesh is sound rather than whether it is a solid.
+       */
+      if (profileCrossesAxis(profile, plane, axisOrigin, axisDir)) {
+        return {
+          error:
+            'The section crosses the axis, so revolving it would cancel itself out. '
+            + 'Move it clear of the axis with "Offset from axis", or make it narrower.',
+        };
+      }
+
+      const solid = revolve(profile, plane, {
+        axisOrigin,
+        axisDir,
         angleDeg: n('angle', 360),
         feature: f.id,
       });
@@ -1198,6 +1272,87 @@ export function applyFeature(current: Mesh, f: Feature, doc: Document): FeatureR
       return { mesh: out };
     }
 
+    /*
+     * A folded sheet part: flats joined by bends.
+     *
+     * Built as a chain in the XZ plane and extruded across, which is what a folded part is —
+     * a profile of constant thickness swept along the width of the sheet. Each bend is a run of
+     * short segments round the inside radius, so the corner is a real radius rather than a
+     * knife edge, because a press brake cannot produce one and a model that shows one lies about
+     * what will arrive.
+     *
+     * The flat pattern lives in `domain/sheetmetal.ts` and is the half that decides whether the
+     * part comes back the right length. This is the half you can look at.
+     */
+    case 'sheet': {
+      const thickness = Math.max(0.1, n('thickness', 2));
+      const width = Math.max(1, n('width', 60));
+      const radius = Math.max(0.01, n('radius', thickness));
+
+      const shape = str(p, 'shape', 'angle');
+      const a = Math.max(0.1, n('flangeA', 60));
+      const b = Math.max(0.1, n('flangeB', 40));
+      const c = Math.max(0.1, n('flangeC', 40));
+      const angle = n('angle', 90);
+
+      // The chain of flats and the turns between them, as a sequence of directions.
+      const legs = shape === 'channel' ? [b, a, c] : shape === 'z' ? [b, a, c] : [a, b];
+      const turns = shape === 'channel' ? [angle, angle]
+        : shape === 'z' ? [angle, -angle]
+          : [angle];
+
+      // Walk the centreline of the sheet, turning at each bend, and record the path.
+      const path: Vec2[] = [];
+      let x = 0, y = 0, heading = 0;
+
+      const step = (distance: number) => {
+        x += Math.cos(heading) * distance;
+        y += Math.sin(heading) * distance;
+        path.push([x, y]);
+      };
+
+      path.push([0, 0]);
+      for (let i = 0; i < legs.length; i++) {
+        // The straight part is shorter than the flange by the setback the bend takes up.
+        const before = i > 0 ? setbackOf(turns[i - 1] ?? 0, radius, thickness) : 0;
+        const after = i < turns.length ? setbackOf(turns[i] ?? 0, radius, thickness) : 0;
+        step(Math.max(0.05, (legs[i] ?? 0) - before - after));
+
+        const turn = turns[i];
+        if (turn === undefined) continue;
+
+        // The bend itself, as an arc of the centreline.
+        const sweep = rad(turn);
+        const centreRadius = radius + thickness / 2;
+        const SEGMENTS = 8;
+        for (let k = 1; k <= SEGMENTS; k++) {
+          const part = sweep / SEGMENTS;
+          heading += part;
+          x += Math.cos(heading) * centreRadius * Math.abs(part);
+          y += Math.sin(heading) * centreRadius * Math.abs(part);
+          path.push([x, y]);
+        }
+      }
+
+      if (path.length < 2) return { error: 'That sheet part has no length to fold.' };
+
+      // Offset the centreline both ways by half the thickness to get the closed section.
+      const outline = ribbon(path, thickness / 2);
+      if (outline.length < 3) return { error: 'The folds overlap — use a smaller flange or radius.' };
+
+      const points: number[] = [];
+      for (const [px_, py_] of outline) points.push(px_, py_);
+
+      const solid = extrude(
+        makeProfile(outline),
+        { ...XZ, origin: [0, width / 2, 0] },
+        { distance: width, feature: f.id },
+      );
+      void points;
+
+      return combine(current, place(solid, f, doc), str(p, 'operation', 'add'));
+    }
+
     case 'pocket': {
       if (triCount(current) === 0) return { error: 'There is nothing to pocket yet.' };
       const bb = bounds(current);
@@ -1617,7 +1772,7 @@ function profileFrom(p: Record<string, ParamValue>, doc: Document): Profile | nu
   }
 }
 
-function holePositions(p: Record<string, ParamValue>, doc: Document): Vec2[] {
+export function holePositions(p: Record<string, ParamValue>, doc: Document): Vec2[] {
   const n = (key: string, fallback: number) => num(doc, p, key, fallback);
   const pattern = str(p, 'pattern', 'single');
 
@@ -1761,7 +1916,7 @@ const KIND_LABEL: Record<FeatureKind, string> = {
   sketch: 'Sketch',
   extrude: 'Extrude', revolve: 'Revolve', loft: 'Loft', sweep: 'Sweep',
   rib: 'Rib', draft: 'Draft', dome: 'Dome', split: 'Split', datum: 'Datum',
-  wrap: 'Wrap',
+  wrap: 'Wrap', sheet: 'Sheet metal',
   hole: 'Hole', pocket: 'Pocket', slot: 'Slot',
   fillet: 'Fillet', chamfer: 'Chamfer', shell: 'Shell',
   patternLinear: 'LinearPattern', patternCircular: 'CircularPattern', mirror: 'Mirror',
@@ -1933,6 +2088,25 @@ export function paramFields(
         N('endScale', 'End scale', 0.05, 20, 0.05, ''), OPERATION];
     }
 
+    case 'sheet': {
+      const shape = params ? str(params, 'shape', 'angle') : 'angle';
+      return [
+        { key: 'shape', label: 'Shape', unit: '', min: 0, max: 0, step: 0, kind: 'choice',
+          choices: [
+            { value: 'angle', label: 'Angle — one bend' },
+            { value: 'channel', label: 'Channel — two bends, same way' },
+            { value: 'z', label: 'Z — two bends, opposite ways' },
+          ] },
+        N('thickness', 'Material thickness', 0.1, 30),
+        N('width', 'Width across the sheet', 1, 3000),
+        N('radius', 'Inside bend radius', 0.05, 100),
+        N('angle', 'Bend angle', 1, 170, 1, 'deg'),
+        N('flangeA', shape === 'angle' ? 'First flange' : 'Web', 1, 3000),
+        N('flangeB', shape === 'angle' ? 'Second flange' : 'First flange', 1, 3000),
+        ...(shape === 'angle' ? [] : [N('flangeC', 'Second flange', 1, 3000)]),
+        OPERATION,
+      ];
+    }
     case 'wrap':
       return [
         N('count', 'How many', 1, 240, 1, ''),
@@ -2024,7 +2198,13 @@ export function paramFields(
         N('x', 'X', -1000, 1000), N('y', 'Y', -1000, 1000),
         N('boltCircle', 'Bolt circle diameter', 1, 2000), N('count', 'Count', 1, 48, 1, ''),
         N('cols', 'Columns', 1, 20, 1, ''), N('rows', 'Rows', 1, 20, 1, ''),
-        N('spacingX', 'Spacing X', 1, 500), N('spacingY', 'Spacing Y', 1, 500)];
+        N('spacingX', 'Spacing X', 1, 500), N('spacingY', 'Spacing Y', 1, 500),
+        // Where the pattern is centred. `holePositions` has always read these; nothing
+        // declared them, so a bolt circle could only ever sit on the origin — not because
+        // anyone decided that, but because the field to move it was missing from the schema
+        // the editor and the script parser both read. A parameter the evaluator honours and
+        // no schema names is a parameter that cannot be set.
+        N('cx', 'Pattern centre X', -1000, 1000), N('cy', 'Pattern centre Y', -1000, 1000)];
     }
     case 'pocket':
       return [N('length', 'Length', 1, 1000), N('width', 'Width', 1, 1000), N('depth', 'Depth', 0.1, 500),
@@ -2116,13 +2296,17 @@ export function defaultParams(kind: FeatureKind): Record<string, ParamValue> {
       pathRadius: 30, turns: 4, pitch: 12, distance: 80, pathAngle: 90,
       twist: 0, endScale: 1, operation: 'add',
     };
+    case 'sheet': return {
+      shape: 'angle', thickness: 2, width: 60, radius: 2, angle: 90,
+      flangeA: 60, flangeB: 40, flangeC: 40, operation: 'add',
+    };
     case 'dome': return { height: 10, face: 'top', smoothness: 4 };
     case 'wrap': return { count: 24, depth: 1.5, width: 2, height: 20, z: 0, operation: 'cut' };
     case 'split': return { plane: 'YZ', at: 0.5, keep: 'both' };
     case 'datum': return { basePlane: 'XY', offset: 20, tiltX: 0, tiltY: 0 };
     case 'rib': return { thickness: 4, height: 20, length: 60, x: 0, y: 0, draft: 1 };
     case 'draft': return { angle: 2 };
-    case 'hole': return { holeType: 'through', pattern: 'single', diameter: 8, x: 0, y: 0, boltCircle: 80, count: 6, cols: 2, rows: 2, spacingX: 40, spacingY: 40 };
+    case 'hole': return { holeType: 'through', pattern: 'single', diameter: 8, x: 0, y: 0, boltCircle: 80, count: 6, cols: 2, rows: 2, spacingX: 40, spacingY: 40, cx: 0, cy: 0 };
     case 'pocket': return { length: 30, width: 20, depth: 5, cornerRadius: 2, x: 0, y: 0 };
     case 'slot': return { length: 30, width: 8, x: 0, y: 0, angle: 0 };
     case 'fillet': return { radius: 3, minAngle: 30, faceMatch: 'bounding', convexity: 'all', faces: [] };
@@ -2197,6 +2381,8 @@ export function deserialise(text: string): Document | null {
       // away as fake.
       ...(typeof raw.knownMassGrams === 'number' ? { knownMassGrams: raw.knownMassGrams } : {}),
       globals: raw.globals ?? [],
+      ...(raw.properties ? { properties: raw.properties } : {}),
+      ...(raw.configurations ? { configurations: raw.configurations } : {}),
       features: raw.features.map((f): Feature => {
         const feature: Feature = { ...f, suppressed: f.suppressed ?? false };
         if (feature.kind !== 'imported') return feature;

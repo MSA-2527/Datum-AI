@@ -13,7 +13,8 @@
  * instead of looking finished.
  */
 
-import { findMeasures } from '../generate/parse';
+import { findMeasures, type Measure } from '../generate/parse';
+import { baseClause } from '../generate/compose';
 import { bounds, type Mesh } from '../kernel/topo/mesh';
 
 export type RequirementKind =
@@ -115,35 +116,83 @@ export function readRequirements(text: string): Requirement[] {
     for (let i = material.index; i < material.index + material[0].length; i++) claimed.add(i);
   }
 
-  for (const measure of findMeasures(text)) {
+  /*
+   * Dimensions come from the base clause, never from an operation clause.
+   *
+   * "A 50 mm cylinder 80 mm long with a 12 mm hole through it" states one length: 80 mm. Read
+   * across the whole sentence, the hole's 12 was taken as a length too, and because a later
+   * reading wins a tie — that rule exists so "200 mm long, no, 300 mm long" corrects itself —
+   * the 80 was discarded. The correction pass then scaled the whole cylinder to be 12 mm long.
+   *
+   * Mass and material are still read from the whole request: neither is a dimension of an
+   * operation, and "in 6061" or "under 2 kg" is as likely to come at the end as anywhere.
+   */
+  const dimensional = baseClause(text);
+
+  /*
+   * Dimensions come from the base clause, never from an operation clause.
+   *
+   * "A 50 mm cylinder 80 mm long with a 12 mm hole through it" states one length: 80 mm. Read
+   * across the whole sentence, the hole's 12 was taken as a length too, and because a later
+   * reading wins a tie — that rule exists so "200 mm long, no, 300 mm long" corrects itself —
+   * the 80 was discarded. The correction pass then scaled the whole cylinder to be 12 mm long.
+   *
+   * Mass and material are still read from the whole request: neither is a dimension of an
+   * operation, and "in 6061" or "under 2 kg" is as likely to come at the end as anywhere.
+   */
+  const candidates: { measure: Measure; kind: RequirementKind; distance: number; at: number }[] = [];
+
+  for (const measure of findMeasures(dimensional)) {
     if (claimed.has(measure.index)) continue;
 
     // The naming word may come before the number ("length of 400 mm") or after it
-    // ("400 mm long"), so both sides are searched and the nearer one wins.
-    const before = lower.slice(Math.max(0, measure.index - WINDOW), measure.index);
-    const after = lower.slice(
+    // ("400 mm long"), so both sides are searched.
+    const before = dimensional.slice(Math.max(0, measure.index - WINDOW), measure.index);
+    const after = dimensional.slice(
       measure.index + measure.raw.length,
       measure.index + measure.raw.length + WINDOW,
     );
-
-    let best: { kind: RequirementKind; distance: number } | null = null;
 
     for (const { words, kind } of DIMENSION_WORDS) {
       for (const word of words) {
         const re = new RegExp(`\\b${word}\\b`);
 
         const inAfter = after.search(re);
-        if (inAfter >= 0 && (!best || inAfter < best.distance)) best = { kind, distance: inAfter };
+        if (inAfter >= 0) {
+          candidates.push({
+            measure, kind, distance: inAfter,
+            at: measure.index + measure.raw.length + inAfter,
+          });
+        }
 
         const inBefore = before.search(re);
         if (inBefore >= 0) {
-          const distance = before.length - inBefore;
-          if (!best || distance < best.distance) best = { kind, distance };
+          candidates.push({
+            measure, kind, distance: before.length - inBefore,
+            at: Math.max(0, measure.index - WINDOW) + inBefore,
+          });
         }
       }
     }
+  }
 
-    if (best) out.push({ kind: best.kind, value: measure.mm, source: measure.raw });
+  /*
+   * Closest pairing first, and one naming word to one measurement.
+   *
+   * Both halves are load-bearing. "A 100 mm long bar 20 mm square" has a single "long" in it;
+   * unclaimed, it named both the 100 before it and the 20 after it, and the later reading won
+   * — so the bar was 20 mm long. Claiming it fixes that, but only if the *nearest* measurement
+   * claims it: taking them in the order they appear let the 50 of "a 50 mm cylinder 80 mm long"
+   * claim a "long" that was seventeen characters away and belonged to the 80 beside it.
+   */
+  const usedWords = new Set<number>();
+  const usedMeasures = new Set<number>();
+
+  for (const c of [...candidates].sort((a, b) => a.distance - b.distance)) {
+    if (usedWords.has(c.at) || usedMeasures.has(c.measure.index)) continue;
+    usedWords.add(c.at);
+    usedMeasures.add(c.measure.index);
+    out.push({ kind: c.kind, value: c.measure.mm, source: c.measure.raw });
   }
 
   const count = /\b(\d+)\s*(?:off|x)\b|\b(\d+)\s+(?:holes|bolts|screws|teeth|slots)\b/i.exec(text);
@@ -203,10 +252,26 @@ export function checkRequirements(
    * height is Z. Length and width are the two horizontal ones, larger and smaller — that reads
    * a plate right whichever way round it was drawn, which sorting did get right.
    */
+  /*
+   * Whether the request separately said how tall the part is.
+   *
+   * It decides what "long" is allowed to mean. On a part standing on its axis — a pipe, a
+   * shaft, a bolt — the length *is* the Z extent, and reading it as the larger horizontal one
+   * returned the diameter instead: "a pipe 60 mm od 5 mm wall 200 mm long" measured 60 where
+   * 200 was asked for, and the correction pass then scaled the whole part by 3.3 to close a
+   * gap that was never there. The reply still said "Length 200 mm, as asked", because by then
+   * the wrongly-measured axis really was 200.
+   *
+   * When the request states a height as well, Z is spoken for and length goes back to the
+   * larger horizontal extent, which is what makes "a cup 120 mm tall and 80 mm long" read
+   * correctly.
+   */
+  const statesHeight = requirements.some((r) => r.kind === 'height');
+
   const actualFor = (kind: RequirementKind): number => {
     switch (kind) {
       case 'height': return z;
-      case 'length': return Math.max(x, y);
+      case 'length': return statesHeight ? Math.max(x, y) : Math.max(x, y, z);
       case 'width': return Math.min(x, y);
       // A round part's diameter is its span across the axis it was turned about.
       case 'diameter': return Math.max(x, y);

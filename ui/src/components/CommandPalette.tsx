@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store';
-import { FEATURE_TEMPLATES, evaluate, massGrams } from '../lib/partModel';
-import { download, toDxf, toManifest, toSvg } from '../lib/exporters';
+import { useModel } from '../modelStore';
+import { KINDS } from './ModelTree';
+import { download } from '../lib/exporters';
+import { triCount } from '../engine';
 
 /**
  * Command palette (Ctrl+K) and the global keyboard map.
@@ -25,33 +27,59 @@ export function CommandPalette() {
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const doc = useStore((s) => s.doc);
-  const addFeature = useStore((s) => s.addFeature);
-  const undoLast = useStore((s) => s.undoLast);
-  const redoLast = useStore((s) => s.redoLast);
-  const saveDocument = useStore((s) => s.saveDocument);
-  const newDocument = useStore((s) => s.newDocument);
+  /*
+   * Bound to the document the user is looking at.
+   *
+   * These commands - and Ctrl+Z, Ctrl+Y and Ctrl+S with them - drove the 2.5D `store`, which
+   * standalone holds a sample bracket nobody opened. So the palette's Undo, the palette's Save
+   * and the *keyboard shortcuts the toolbar advertises in its own tooltips* all ran against a
+   * document that is not on screen: pressing Ctrl+Z on a plate left the plate exactly where it
+   * was, with no error and nothing to suggest the keystroke had gone somewhere else.
+   *
+   * The view and mode commands still belong to `store`. They navigate the SOLIDWORKS-facing
+   * surfaces, which is what that store is for.
+   */
+  const doc = useModel((s) => s.doc);
+  const evaluated = useModel((s) => s.evaluated);
+  const addFeature = useModel((s) => s.addFeature);
+  const undo = useModel((s) => s.undo);
+  const redo = useModel((s) => s.redo);
+  const clear = useModel((s) => s.clear);
+  const save = useModel((s) => s.save);
+  const exportDrawing = useModel((s) => s.exportDrawing);
+  const exportStl = useModel((s) => s.exportStl);
+  const exportStep = useModel((s) => s.exportStep);
+
   const setTab = useStore((s) => s.setTab);
   const setMode = useStore((s) => s.setMode);
+
+  const saveDocument = useCallback(() => {
+    download(`${doc.name}.datum.json`, save(), 'application/json');
+    useModel.setState({
+      notice: {
+        tone: 'info',
+        text: `Saved ${doc.name}.datum.json - the feature tree, not the mesh, so it stays editable.`,
+      },
+    });
+  }, [doc.name, save]);
 
   const commands = useMemo<Command[]>(() => {
     const list: Command[] = [];
 
-    for (const t of FEATURE_TEMPLATES) {
-      if (t.needsSeed) continue; // a seedless pattern would fail on invoke
+    for (const k of KINDS) {
       list.push({
-        id: `add.${t.kind}`,
-        label: `Add ${t.label}`,
+        id: `add.${k.kind}`,
+        label: `Add ${k.label}`,
         group: 'Model',
-        run: () => addFeature(t.kind, {}),
+        run: () => addFeature(k.kind),
       });
     }
 
     list.push(
-      { id: 'doc.new', label: 'New part', group: 'Document', hint: 'Ctrl+N', run: newDocument },
-      { id: 'doc.save', label: 'Save part', group: 'Document', hint: 'Ctrl+S', run: () => saveDocument() },
-      { id: 'edit.undo', label: 'Undo', group: 'Edit', hint: 'Ctrl+Z', run: () => void undoLast() },
-      { id: 'edit.redo', label: 'Redo', group: 'Edit', hint: 'Ctrl+Y', run: redoLast },
+      { id: 'doc.new', label: 'New part', group: 'Document', run: clear },
+      { id: 'doc.save', label: 'Save part', group: 'Document', hint: 'Ctrl+S', run: saveDocument },
+      { id: 'edit.undo', label: 'Undo', group: 'Edit', hint: 'Ctrl+Z', run: undo },
+      { id: 'edit.redo', label: 'Redo', group: 'Edit', hint: 'Ctrl+Y', run: redo },
       { id: 'view.chat', label: 'Go to Chat', group: 'View', run: () => setTab('chat') },
       { id: 'view.tree', label: 'Go to Model tree', group: 'View', run: () => setTab('tree') },
       { id: 'view.params', label: 'Go to Parameters', group: 'View', run: () => setTab('params') },
@@ -61,35 +89,44 @@ export function CommandPalette() {
       { id: 'mode.build', label: 'Mode: Build', group: 'Mode', run: () => setMode('Build') },
     );
 
-    if (doc) {
-      const base = doc.title.replace(/\.[^.]+$/, '');
+    // Nothing modelled means nothing to export, and a command that can only fail is worse
+    // than one that is not offered.
+    if (triCount(evaluated.mesh) > 0) {
+      const write = (out: { name: string; text: string } | null, mime: string) => {
+        if (out) download(out.name, out.text, mime);
+      };
+
       list.push(
         {
-          id: 'export.dxf',
-          label: 'Export DXF',
-          group: 'Export',
-          run: () => download(`${base}.dxf`, toDxf(evaluate(doc)), 'application/dxf'),
-        },
-        {
           id: 'export.svg',
-          label: 'Export SVG',
+          label: 'Export drawing as SVG',
           group: 'Export',
-          run: () => download(`${base}.svg`, toSvg(evaluate(doc)), 'image/svg+xml'),
+          run: () => write(exportDrawing('svg'), 'image/svg+xml'),
         },
         {
-          id: 'export.summary',
-          label: 'Export manufacturing summary',
+          id: 'export.dxf',
+          label: 'Export drawing as DXF',
           group: 'Export',
-          run: () => {
-            const g = evaluate(doc);
-            download(`${base}-summary.txt`, toManifest(doc, g, massGrams(doc, g)), 'text/plain');
-          },
+          run: () => write(exportDrawing('dxf'), 'application/dxf'),
+        },
+        {
+          id: 'export.step',
+          label: 'Export STEP',
+          group: 'Export',
+          run: () => write(exportStep(), 'application/step'),
+        },
+        {
+          id: 'export.stl',
+          label: 'Export STL',
+          group: 'Export',
+          run: () => write(exportStl(), 'text/plain'),
         },
       );
     }
 
     return list;
-  }, [doc, addFeature, newDocument, saveDocument, undoLast, redoLast, setTab, setMode]);
+  }, [evaluated, addFeature, clear, saveDocument, undo, redo,
+      exportDrawing, exportStl, exportStep, setTab, setMode]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -135,10 +172,10 @@ export function CommandPalette() {
 
       if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'z') {
         e.preventDefault();
-        void undoLast();
+        undo();
       } else if (e.ctrlKey && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
         e.preventDefault();
-        redoLast();
+        redo();
       } else if (e.ctrlKey && e.key.toLowerCase() === 's') {
         e.preventDefault();
         saveDocument();
@@ -147,7 +184,7 @@ export function CommandPalette() {
 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, undoLast, redoLast, saveDocument]);
+  }, [open, undo, redo, saveDocument]);
 
   if (!open) return null;
 

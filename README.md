@@ -20,15 +20,15 @@ any solid                             →  a dimensioned, toleranced drawing in 
 
 | | What you get | Where it stops |
 |---|---|---|
-| **Model** | Extrude, revolve, sweep, loft. Boolean union/cut/intersect. Shell, fillet, chamfer, draft, pattern, mirror. Exact mass, centroid and inertia tensor at every step. | Tessellated, not analytic. Dimensions are exact; curved-body *volume* runs low by a known amount — 0.4% at default quality, under 0.03% at the finest. |
-| **Sketch** | Draw lines, rectangles and circles; relations are inferred as you draw, so a rectangle is a rectangle and a near-horizontal line is horizontal. Every length and diameter is shown on the canvas and typing into one drives the geometry. 16 constraint types solved together, with under-defined, fully defined, over-defined and contradictory reported and the constraints at fault named. | 2D only. No dragging geometry yet — sizes are changed by typing them. |
-| **Generate** | 15 parametric archetypes from plain English, with editable parameters and a real feature tree. Understands units, imperial fractions, ISO fastener designations and capacities. | A finite catalogue. Unrecognised requests are refused with suggestions, not approximated. |
+| **Model** | Extrude, revolve, sweep, loft. Boolean union/cut/intersect. Shell, fillet, chamfer, draft, pattern, mirror. Exact mass, centroid and inertia tensor at every step. | Tessellated by default; curved-body *volume* runs low by a known amount — 0.4% at default quality, under 0.03% at the finest. **Exact** rebuilds the same part analytically (see below). |
+| **Sketch** | Draw lines, rectangles and circles; relations are inferred as you draw, so a rectangle is a rectangle and a near-horizontal line is horizontal. Every length and diameter is shown on the canvas and typing into one drives the geometry. 17 constraint types solved together, with under-defined, fully defined, over-defined and contradictory reported and the constraints at fault named. | 2D only. No dragging geometry yet — sizes are changed by typing them. |
+| **Generate** | Named archetypes from plain English, and — for anything outside them — a request read as a **shape and the operations performed on it**: "a hollow box 80 x 60 x 40 with 3 mm walls" becomes a block and a shell, "a 50 mm cylinder 80 mm long with a 12 mm hole" a cylinder and a hole. Holes, pockets, slots, shells, fillets and chamfers compose onto either. Editable parameters and a real feature tree throughout. Understands units, imperial fractions, ISO fastener designations and capacities. | The composer builds on a block, a cylinder, a tube or a sphere; it will not invent a shape it does not know. The request's *head noun* has to name one of those or a catalogue archetype, so "a crankshaft for a 4 cylinder engine" is refused by name rather than answered with the cylinder its subordinate clause happens to mention. A clause naming an operation it cannot build is reported — "not built, because there is no operation for it: an involute spline" — never dropped. |
 | **Trace** | Image → closed profile. Otsu threshold, contour tracing with hole nesting, line and arc recognition, symmetry detection. | A scale must be supplied — an image records no size. Silhouette only. |
 | **Import** | STEP AP203/214 → solid: a Part 21 reader and a B-rep tessellator, no dependency. DXF → solid, by recognising the views and intersecting their extruded outlines. | STEP: planes, cylinders and cones. Splines, tori and spheres are reported and skipped, never approximated. Parts whose cones meet other surfaces come back with hairline cracks and are reported as untrustworthy. DXF: visual hull — an enclosed cavity cannot be seen from outside. |
 | **Draw** | Standard views with true hidden-line removal, automatic dimensions with ISO 2768-m tolerances, grouped hole callouts, GD&T, title block with computed mass. SVG and DXF out. | Envelope and hole pattern. Design-intent dimensions still need an engineer. |
 | **Assemble** | Instances, seven mate types, a mate solver, interference detection that tells a press fit from a clash, mass properties and a bill of materials. | Static. No motion study, no contact simulation. |
 | **Manufacture** | CNC, sheet metal, additive and moulding rule packs; every finding cites its rule. The same limits are stated to the planner *before* it designs, from one definition, so the prompt and the linter cannot disagree. Itemised cost model. | Cost is an estimate for comparing designs, not a quotation. |
-| **Learn** | Your own parts become worked examples: a request, and the plan that answers it. A whole exported folder can be taught in one pass, geometry from the STEP files and requests from the manifest beside them, with an outcome reported for every file. The closest are retrieved and shown to the model at request time, so it builds in your vocabulary and conventions — and every example that steered an answer is named in the reply. Exports as JSONL for a real fine-tune later. | Retrieval, not gradient training: nothing adjusts a model's weights. An example must be expressible as a plan, so parts using sketches or fillets are refused rather than stored half-learnt. |
+| **Learn** | Programs are generated, executed through this same kernel, and kept only if they built a closed manifold solid — a corpus made without anyone drawing anything, with the measurement attached to every pair (`datum corpus`, 99% yield). Your own parts become worked examples too: a request, and the plan that answers it. A whole exported folder can be taught in one pass, geometry from the STEP files and requests from the manifest beside them, with an outcome reported for every file. The closest are retrieved and shown to the model at request time, so it builds in your vocabulary and conventions — and every example that steered an answer is named in the reply. Exports as JSONL for a real fine-tune later. | Retrieval, not gradient training: nothing adjusts a model's weights. An example must be expressible as a plan, so parts using sketches or fillets are refused rather than stored half-learnt. |
 | **Recognise** | An imported solid is read back into something editable. A catalogue shape first — parameters derived from the mesh, the archetype rebuilt, the two compared. Failing that, the **extruded profile** itself: the solid is sectioned at every height its cross-section changes, each slab's outline traced, drilled holes recovered as circles with their diameters, and the stack re-extruded and checked. Accepted only at 97% agreement. | Catalogue: box, cylinder, pipe, washer, stepped shaft, hex nut. Profile: parts that section into a handful of constant slabs — a plain plate, a base with pads, a multi-level clip. Beyond a handful of levels a stack of slabs stops describing the design and becomes a voxelisation, and is refused. A solid that imports non-manifold is refused on that ground: a section is only as trustworthy as the solid it is cut from. |
 | **Anodize** | Any part on screen sizes an anodizing rack: wetted area measured off the solid, current from the process density, spine/arm/contact sections from that current, tier count from tank depth, part pitch from solution flow, cooling load in kW and L/min, coating time and the growth that changes the fit. Eight quality checks, each stating its measurement and limit. | Steady-state figures a rack is sized from. No bath chemistry, rectifier ripple, or thermal transient. |
 | **Reuse** | Saved parts are searched *before* anything is generated. A request that matches one is answered with the part rather than a second copy of it, and a stated dimension the saved part does not meet vetoes the match outright. | Local library only. Matching is on words, archetype and stated dimensions — there is no part yet to compare geometry against. |
@@ -44,6 +44,77 @@ npm --prefix ui run dev
 
 That is the whole setup. Then type `make a cup`, or `M10 hex nut`, or
 `200 x 120 x 8 plate with 9 mm holes`.
+
+### Writing a part down
+
+Every part is also a program, and the two are the same document:
+
+```
+name Mounting bracket
+param L = 120
+param W = 80
+param T = 10
+
+box     Body   length=L width=W height=T
+pocket  Relief length=40 width=30 depth=3 x=0 y=0 cornerRadius=0
+hole    Bolts  diameter=6.6 holeType=through pattern=boltCircle count=4 boltCircle=60
+chamfer Break  distance=1
+```
+
+Edit the tree and the text follows; edit the text and the tree does. Every statement names a
+feature the kernel implements and every argument is checked against that feature's own schema
+— the same one the sliders are drawn from — so **a script that could not be built does not
+run**. There are no loops, no branches and no way to compute anything but arithmetic over the
+part's own parameters, which is what keeps the guarantee that a model cannot emit geometry the
+kernel would not have built while removing the ceiling that a fixed catalogue imposes.
+
+### Headless
+
+```bash
+npm --prefix ui run cli          # build it once
+node ui/dist-cli/datum.mjs run bracket.datum
+```
+
+```
+datum run      <file>            build a part and report what it made
+datum inspect  <file>            measurements, health and the feature tree
+datum dfm      <file>            manufacturability findings and cost
+datum export   <file> --out <f>  .step .svg .dxf .stl .json .datum
+datum render   <file> --out <f>  PNG views, for a person or a model
+datum corpus   --out <f>         synthesise training data
+datum print    <file>            print a saved document as a script
+```
+
+Every command answers with **evidence rather than a verdict** — `inspect` returns the volume,
+the mass, the envelope and every feature with its state; `dfm` names each rule that fired and
+the limit it enforces. `--json` gives the same content as one object. Exit codes mean
+something: a part that did not close, or a feature that failed, or a blocking manufacturability
+finding, each fail the command, so any of them can gate a build.
+
+`datum corpus` is the part that makes training reachable. It samples parts, writes them as
+scripts, runs them through the same kernel the product runs on, and keeps only what built a
+closed manifold solid — with the measurement attached. A corpus filtered on "it parsed"
+teaches a model to write plausible-looking scripts; one filtered on "it produced a
+manufacturable solid" teaches it to write parts.
+
+### The number to check first
+
+Type `a 50 mm cylinder 80 mm long`, then press **Exact**.
+
+```
+tessellated   156 670 mm³      0.26% low
+exact         157 079.63 mm³   3 analytic faces
+closed form   157 079.63267 mm³   π × 25² × 80
+```
+
+Exact to five significant figures. The mesh kernel is fast and runs slightly low because an
+inscribed polygon under-runs its circle; the exact kernel does not approximate at all, and
+returns three selectable faces rather than a triangle count — which is the difference between
+a solid a CAM package can work on and one it can only look at.
+
+Both figures are asserted against the closed form in
+[`fromDocument.test.ts`](ui/src/kernel/brep/fromDocument.test.ts), so neither can drift. Most
+of this category cannot state a volume error at all, because nothing is being compared to.
 
 ### Deploying it
 
@@ -83,8 +154,17 @@ ui/src/kernel/
   ops/boolean.ts            BSP boolean engine with T-junction repair
   ops/modify.ts             Shell, fillet, chamfer, patterns, holes
   assembly/assembly.ts      Instances, mates, interference, BOM
-ui/src/generate/            Text → parametric archetypes
+ui/src/generate/parse.ts    Text → a named archetype, gated on the request's head noun
+ui/src/generate/compose.ts  Text → a shape and the operations performed on it
+ui/src/generate/script.ts   DatumScript: a part, written down — and read back
+ui/src/ai/scriptRoute.ts    A model writes the script; its errors go back to it
+ui/src/ml/synth.ts          Programs generated, executed, and kept only if they build
+ui/src/render/raster.ts     A software rasteriser, so a part can be seen without a GPU
+ui/src/ai/review.ts         The model is shown what it built, and says if it is wrong
+ui/src/cli.ts               The headless surface: run, inspect, dfm, render, export, corpus
 ui/src/lib/limits.ts        Manufacturing limits as data: enforced by the linter, stated to the planner
+ui/src/lib/projectPart.ts   The feature tree measured into the 2.5D view the DFM rules read
+ui/src/lib/docRecipes.ts    Saved sequences of steps, run against a document or a whole library
 ui/src/lib/library.ts       The named part library, and what was measured when each was saved
 ui/src/lib/reuse.ts         "Have we already made this?", asked before anything is generated
 ui/src/lib/training.ts      Your parts as worked examples, retrieved into the prompt at request time
@@ -97,7 +177,7 @@ ui/src/ingest/fit/          Mesh → archetype or extruded profile: propose, reb
 ui/src/domain/anodizing.ts  Rack sizing: area → current → section → cooling, every figure cited
 ui/src/eval/                The benchmark: cases, runner, and the regression gate (npm run eval)
 tools/solidworks/           Batch export from an existing SOLIDWORKS library
-src/DATUM.Kernel/           SOLIDWORKS connector (optional, unverified — see below)
+src/DATUM.Connector.SolidWorks/           SOLIDWORKS connector (optional, unverified — see below)
 src/DATUM.Orchestrator/     Local service: planner routing, storage, audit
 ```
 
@@ -143,10 +223,16 @@ geometry least, which is also the one a user expects.
 npm --prefix ui test
 ```
 
-**451 tests.** They assert against closed-form answers wherever one exists — a revolved
-sphere must have volume 4/3·πr³, a cut block must lose exactly the volume of the cut, an
-inscribed polygon must under-run its circle by exactly `1 − (n/2π)·sin(2π/n)` — because
-comparing against a previous run only proves the kernel is consistently wrong.
+They assert against closed-form answers wherever one exists — a revolved sphere must have
+volume 4/3·πr³, a cut block must lose exactly the volume of the cut, an inscribed polygon must
+under-run its circle by exactly `1 − (n/2π)·sin(2π/n)` — because comparing against a previous
+run only proves the kernel is consistently wrong.
+
+How many there are, and how much else there is, is in [docs/FACTS.md](docs/FACTS.md). That
+file is **generated from the code** by `npm --prefix ui run facts`, and CI fails if it is out
+of date — because five documents here once stated five different test counts, all of them true
+on the day they were typed. A number kept by hand beside the thing it describes is a number
+that drifts, and a stale count in a technical document is not read as staleness.
 
 Every boolean result is checked for closure, manifoldness and Euler characteristic. Every
 archetype must produce a closed solid or report `valid: false` with a reason. Every
@@ -156,7 +242,7 @@ constraint's Jacobian is verified against central differences.
 
 ## The SOLIDWORKS connector
 
-`src/DATUM.Kernel` is a .NET Framework 4.8 `ISwAddin` that pushes the same operations into a
+`src/DATUM.Connector.SolidWorks` is a .NET Framework 4.8 `ISwAddin` that pushes the same operations into a
 live SOLIDWORKS session as native features.
 
 **It has never been compiled.** Building it needs the interop assemblies that ship with a
@@ -170,7 +256,7 @@ walks every user journey end to end and imports nothing from the connector.
 
 ```bash
 # On a machine with SOLIDWORKS 2022–2026 installed:
-dotnet build src\DATUM.Kernel\DATUM.Kernel.csproj -c Release
+dotnet build src\DATUM.Connector.SolidWorks\DATUM.Connector.SolidWorks.csproj -c Release
 ```
 
 Expect interop signature drift — `HoleWizard5`, `AddMate5`, `FeatureLinearPattern5` and
@@ -210,3 +296,5 @@ cannot produce something the kernel would not have built.
 | [docs/03-product-spec.md](docs/03-product-spec.md) | Modules with acceptance criteria, release plan, metrics |
 | [docs/04-ux-spec.md](docs/04-ux-spec.md) | Design system, screens, latency budgets, keyboard map |
 | [docs/07-status-report.md](docs/07-status-report.md) | What is built, what is verified, what is not |
+| [docs/FACTS.md](docs/FACTS.md) | Every figure this project states about itself, counted from the code |
+| [docs/09-model-benchmark.md](docs/09-model-benchmark.md) | The model path, measured against a real provider |

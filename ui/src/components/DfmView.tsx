@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
-import { useStore } from '../store';
-import { evaluate } from '../lib/partModel';
+import { useModel } from '../modelStore';
+import { projectPart } from '../lib/projectPart';
 import { analyseDfm, estimateCost, MATERIALS, type DfmSeverity, type Process } from '../lib/dfm';
 import { analysePack, type ProcessPack } from '../lib/dfmPacks';
 
@@ -30,8 +30,22 @@ const PROCESSES: { id: Process; label: string; pack?: ProcessPack }[] = [
  * Entirely deterministic — no planner, no network, free tier.
  */
 export function DfmView() {
-  const doc = useStore((s) => s.doc);
-  const send = useStore((s) => s.send);
+  /*
+   * Measured off the part on screen.
+   *
+   * This read from `store.doc` — the 2.5D sample bracket invented at boot — so every finding
+   * and every cost line described a part the user had never asked for, sitting beside the one
+   * they had. `projectPart` measures the real solid and reads the real feature tree, so the
+   * rules now cite the part in the viewport.
+   */
+  const modelDoc = useModel((s) => s.doc);
+  const evaluated = useModel((s) => s.evaluated);
+  const build = useModel((s) => s.build);
+
+  const projected = useMemo(
+    () => projectPart(modelDoc, evaluated), [modelDoc, evaluated],
+  );
+  const { doc, geometry: geom, prismatic } = projected;
 
   const [quantity, setQuantity] = useState(1);
   // Index rather than id: two entries legitimately share a cost model (a moulded part is
@@ -41,8 +55,6 @@ export function DfmView() {
 
   const selected = PROCESSES[processIndex] ?? PROCESSES[0]!;
   const process: Process = selected.id;
-
-  const geom = useMemo(() => (doc ? evaluate(doc) : null), [doc]);
 
   const findings = useMemo(() => {
     if (!doc || !geom) return [];
@@ -56,8 +68,14 @@ export function DfmView() {
     [doc, geom, findings, quantity],
   );
 
-  if (!doc || !geom || !cost) {
-    return <div className="empty">Open a part to analyse manufacturability.</div>;
+  if (geom.T <= 0 || !cost) {
+    return (
+      <div className="empty">
+        <strong>Nothing to analyse</strong>
+        Manufacturability is measured off the solid. Describe a part in the chat, or add a
+        feature from the Model Explorer.
+      </div>
+    );
   }
 
   const blockers = findings.filter((f) => f.severity === 'blocker');
@@ -99,6 +117,24 @@ export function DfmView() {
           </button>
         ))}
       </div>
+
+      {/*
+        The limit of the reading, stated where the reading is.
+
+        These rules describe a profile swept to a thickness. A revolved, lofted or swept body
+        is not one, so its envelope is measured correctly and its *outline* is not — and a
+        finding about a corner radius on a part with no corners is worse than no finding.
+        Saying so here costs one line and stops the numbers being over-read.
+      */}
+      {!prismatic && (
+        <div className="note">
+          <b>Envelope reading</b>
+          This part is not a constant section swept to a thickness, so these rules are applied
+          to its {geom.L.toFixed(0)} × {geom.W.toFixed(0)} × {geom.T.toFixed(0)} mm envelope and
+          its measured volume. Mass, volume and cost follow the real solid; anything about the
+          outline describes the envelope, not the shape.
+        </div>
+      )}
 
       {/* ── cost breakdown ── */}
       <div className="st-h" style={{ padding: '10px 0 4px' }}>
@@ -181,7 +217,7 @@ export function DfmView() {
               → {f.remedy}
             </div>
             <div className="fa">
-              <button className="btn determ" onClick={() => void send(fixPrompt(f.title, f.remedy))}>
+              <button className="btn determ" onClick={() => void build(fixPrompt(f.title, f.remedy))}>
                 Ask DATUM to fix
               </button>
               {f.costImpact ? (

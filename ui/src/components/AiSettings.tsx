@@ -172,6 +172,36 @@ export function AiSettings({ onClose }: { onClose: () => void }) {
               </label>
             )}
 
+            {/*
+              What this provider can be shown, stated where the provider is chosen.
+
+              Not a setting — there is nothing to switch. It is here because "can this one look
+              at a photograph" is the question that decides whether half the product is
+              available, and the alternative to answering it here is a user discovering the
+              answer as a refusal, later, with a picture already loaded.
+            */}
+            <div className="ai-check" style={{ alignItems: 'flex-start' }}>
+              <span aria-hidden="true" style={{ fontFamily: 'var(--mono)' }}>
+                {info.supportsImages ? '◉' : '○'}
+              </span>
+              <span>
+                <strong>
+                  {info.supportsImages
+                    ? `${info.label} can be sent images`
+                    : `${info.label} cannot be sent images`}
+                </strong>
+                <em>
+                  {info.supportsImages
+                    ? 'Photographs and drawing sheets can be attached to a request. Whether the '
+                      + 'particular model you name can see is worth checking — the endpoint '
+                      + 'accepts them either way.'
+                    : 'Requests carrying a picture are refused rather than sent without it: a '
+                      + 'model answering about an image it never received reads exactly like '
+                      + 'one that did.'}
+                </em>
+              </span>
+            </div>
+
             <div className="ai-actions">
               <button onClick={test} disabled={testing}>
                 {testing ? 'Testing…' : 'Test connection'}

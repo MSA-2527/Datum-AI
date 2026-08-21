@@ -14,7 +14,7 @@ test project, and four design documents.
 
 | Spec concept | Existing implementation |
 |---|---|
-| `ForgePilot.SolidWorksAddin` | `src/DATUM.Kernel` — `ISwAddin`, event tap, idle-pump dispatcher, PID resolver, undo scope, 9 handler families |
+| `ForgePilot.SolidWorksAddin` | `src/DATUM.Connector.SolidWorks` — `ISwAddin`, event tap, idle-pump dispatcher, PID resolver, undo scope, 9 handler families |
 | `ForgePilot.Orchestrator` | `src/DATUM.Orchestrator` — Kestrel loopback, WebSocket fan-out, named-pipe server, provider router, validator, SQLite store |
 | `ForgePilot.Contracts` | `src/DATUM.Contracts` — Operation IR, op catalogue, binary wire protocol |
 | `ForgePilot.UI` | `ui/` — React + TS, one bundle serving the task pane and Studio |
@@ -43,7 +43,7 @@ dotnet build DATUM.NoSolidWorks.slnf -c Release   → Build succeeded. 0 Warning
 dotnet test  DATUM.NoSolidWorks.slnf -c Release   → Passed! Failed: 0, Passed: 87, Total: 87
 ```
 
-`DATUM.Kernel` still cannot build, and this is the one thing that cannot be solved from
+`DATUM.Connector.SolidWorks` still cannot build, and this is the one thing that cannot be solved from
 here: SOLIDWORKS is a licensed commercial product and its interop assemblies are
 Dassault's IP, not redistributable. The `net48` toolchain itself is now proven working —
 `Microsoft.NETFramework.ReferenceAssemblies` removes the Visual Studio requirement, so
@@ -58,9 +58,9 @@ error : SOLIDWORKS interop assemblies not found under
 **To finish the kernel, run on a machine with a SOLIDWORKS seat:**
 
 ```bash
-dotnet build src\DATUM.Kernel\DATUM.Kernel.csproj -c Release
+dotnet build src\DATUM.Connector.SolidWorks\DATUM.Connector.SolidWorks.csproj -c Release
 # or, if SOLIDWORKS is not at the default path:
-dotnet build src\DATUM.Kernel\DATUM.Kernel.csproj -c Release -p:SolidWorksDir="D:\SW\SOLIDWORKS"
+dotnet build src\DATUM.Connector.SolidWorks\DATUM.Connector.SolidWorks.csproj -c Release -p:SolidWorksDir="D:\SW\SOLIDWORKS"
 ```
 
 Expect interop signature drift on that first compile: `HoleWizard5`, `AddMate5`,

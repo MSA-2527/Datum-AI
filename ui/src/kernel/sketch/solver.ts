@@ -81,23 +81,34 @@ export type SketchEntity = SketchPoint | SketchLine | SketchCircle | SketchArc;
 
 // ── constraints ──────────────────────────────────────────────────────────────
 
-export type ConstraintKind =
-  | 'coincident'      // two points occupy the same place
-  | 'distance'        // two points a given distance apart
-  | 'horizontal'      // a line is horizontal
-  | 'vertical'        // a line is vertical
-  | 'parallel'        // two lines are parallel
-  | 'perpendicular'   // two lines meet at 90 degrees
-  | 'equal'           // two lines the same length, or two circles the same radius
-  | 'angle'           // two lines at a given angle
-  | 'pointOnLine'     // a point lies on a line's infinite extension
-  | 'pointOnCircle'   // a point lies on a circle
-  | 'tangent'         // a line is tangent to a circle
-  | 'concentric'      // two circles share a centre
-  | 'symmetric'       // two points mirror across a line
-  | 'radius'          // a circle has a given radius
-  | 'fixX'            // a point's x is pinned
-  | 'fixY';           // a point's y is pinned
+/**
+ * Every relation the solver can hold.
+ *
+ * A runtime array rather than a bare type union, so the count is derivable from the code
+ * instead of restated by hand in prose. The README said sixteen while this listed seventeen;
+ * a number a document keeps separately is a number that drifts.
+ */
+export const CONSTRAINT_KINDS = [
+  'coincident',      // two points occupy the same place
+  'distance',        // two points a given distance apart
+  'horizontal',      // a line is horizontal
+  'vertical',        // a line is vertical
+  'parallel',        // two lines are parallel
+  'perpendicular',   // two lines meet at 90 degrees
+  'equal',           // two lines the same length, or two circles the same radius
+  'angle',           // two lines at a given angle
+  'pointOnLine',     // a point lies on a line's infinite extension
+  'pointOnCircle',   // a point lies on a circle
+  'tangent',         // a line is tangent to a circle
+  'concentric',      // two circles share a centre
+  'symmetric',       // two points mirror across a line
+  'radius',          // a circle has a given radius
+  'fixX',            // a point's x is pinned
+  'fixY',            // a point's y is pinned
+  'sameRadius',      // two points equidistant from a third — what makes an arc an arc
+] as const;
+
+export type ConstraintKind = typeof CONSTRAINT_KINDS[number];
 
 export interface Constraint {
   id: string;
@@ -574,6 +585,45 @@ function buildRows(sketch: Sketch, vm: VarMap, x: Float64Array): Row[] {
         break;
       }
 
+      /*
+       * The two ends of an arc are the same distance from its centre.
+       *
+       * One constraint, and exactly the right number: a centre, a start and an end are six
+       * coordinates, and an arc has five degrees of freedom — centre, radius, and the two
+       * angles. Without this the "arc" is three loose points that happen to be drawn with a
+       * curve through them, and dragging any of them turns it into something that is not an
+       * arc at all.
+       *
+       * On squared radii rather than radii. The gradient of the squared form never vanishes
+       * where this is used — a point sitting exactly on the centre would be a zero-radius arc,
+       * which is not a thing anyone draws — and it avoids two square roots and their
+       * derivatives in the inner loop.
+       */
+      case 'sameRadius': {
+        const [centre, start, end] = c.entities;
+        const pc = pointAt(sketch, vm, x, centre);
+        const ps = pointAt(sketch, vm, x, start);
+        const pe = pointAt(sketch, vm, x, end);
+
+        const sx = ps[0] - pc[0], sy = ps[1] - pc[1];
+        const ex = pe[0] - pc[0], ey = pe[1] - pc[1];
+
+        const g = new Map<number, number>();
+        const ic = px(sketch, vm, centre);
+        const is = px(sketch, vm, start);
+        const ie = px(sketch, vm, end);
+
+        if (is >= 0) { g.set(is, 2 * sx); g.set(is + 1, 2 * sy); }
+        if (ie >= 0) { g.set(ie, -2 * ex); g.set(ie + 1, -2 * ey); }
+        if (ic >= 0) {
+          g.set(ic, -2 * sx + 2 * ex);
+          g.set(ic + 1, -2 * sy + 2 * ey);
+        }
+
+        add(c.id, (sx * sx + sy * sy) - (ex * ex + ey * ey), g);
+        break;
+      }
+
       case 'fixX':
       case 'fixY': {
         const p = c.entities[0];
@@ -841,6 +891,28 @@ export function addCircle(s: Sketch, centre: SketchPoint, radius: number): Sketc
   const c: SketchCircle = { id: nextId('c'), kind: 'circle', centre: centre.id, radius };
   s.entities.set(c.id, c);
   return c;
+}
+
+/**
+ * An arc from `start` to `end` about `centre`, swept counter-clockwise.
+ *
+ * Counter-clockwise by convention, because three points do not say which way round the arc
+ * goes and something has to. Drawing tools order their clicks to suit.
+ *
+ * The radius equality is added with it rather than left to the user. An arc whose ends are not
+ * the same distance from its centre is not an arc, and making that the modeller's problem is
+ * how a sketch ends up looking right and solving to something else.
+ */
+export function addArc(
+  s: Sketch, centre: SketchPoint, start: SketchPoint, end: SketchPoint, construction = false,
+): SketchArc {
+  const a: SketchArc = {
+    id: nextId('a'), kind: 'arc',
+    centre: centre.id, start: start.id, end: end.id, construction,
+  };
+  s.entities.set(a.id, a);
+  constrain(s, 'sameRadius', [centre, start, end]);
+  return a;
 }
 
 export function constrain(

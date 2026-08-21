@@ -1,5 +1,8 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useModel } from '../modelStore';
+import type { RasterImage } from '../ingest/image/trace';
+import { depthAnything } from '../ingest/image/depthAnything';
+import { DEPTH_MODEL } from '../ingest/image/depthModel';
 import { ModelTree } from './ModelTree';
 import { ModelViewport } from './ModelViewport';
 import { Assistant } from './Assistant';
@@ -63,6 +66,8 @@ export function ModelStudio() {
   const exportStl = useModel((s) => s.exportStl);
   const exportStep = useModel((s) => s.exportStep);
   const importImage = useModel((s) => s.importImage);
+  const importImageWithDepth = useModel((s) => s.importImageWithDepth);
+  const makeExact = useModel((s) => s.makeExact);
   const importDxf = useModel((s) => s.importDxf);
   const importStep = useModel((s) => s.importStep);
   const save = useModel((s) => s.save);
@@ -72,6 +77,103 @@ export function ModelStudio() {
   const hasImported = useModel((s) => s.doc.features.some((f) => f.kind === 'imported'));
 
   const [showAi, setShowAi] = useState(false);
+
+  /**
+   * A picture that came back flat, kept in case the user wants its depth read.
+   *
+   * Held rather than acted on: reading it costs a large one-off download of model weights, and
+   * spending somebody's bandwidth because they dragged in a photograph is not a decision this
+   * gets to make for them.
+   */
+  const [depthOffer, setDepthOffer] = useState<
+    { image: RasterImage; mmPerPixel: number; thickness: number } | null
+  >(null);
+  const [depthProgress, setDepthProgress] = useState<string | null>(null);
+
+  /**
+   * A picture the model declined because one part of the object needs surfaces this kernel has
+   * not got, kept so the rest of it can be offered.
+   */
+  const [partialOffer, setPartialOffer] = useState<
+    { bytes: Uint8Array; type: string; why: string } | null
+  >(null);
+  const [partialBusy, setPartialBusy] = useState(false);
+
+  /**
+   * The two column widths, in pixels, remembered between sessions.
+   *
+   * A layout somebody adjusted and then lost on reload is worse than one they cannot adjust:
+   * the second is a limitation and the first is a chore they have to repeat. Read once at
+   * start-up and written on release rather than on every frame — a drag is sixty writes a
+   * second, and storage is synchronous.
+   */
+  const shell = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState<'left' | 'right' | null>(null);
+
+  const resizeFrom = useCallback((side: 'left' | 'right') => (e: React.PointerEvent) => {
+    const box = shell.current;
+    if (!box || e.button !== 0) return;
+
+    setDragging(side);
+    e.preventDefault();
+
+    const move = (ev: PointerEvent) => {
+      const rect = box.getBoundingClientRect();
+      // Measured from the edge the column belongs to, so the number is the column's own width.
+      const px = side === 'left' ? ev.clientX - rect.left : rect.right - ev.clientX;
+      box.style.setProperty(`--ms-${side}`, `${Math.round(px)}px`);
+    };
+
+    const end = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      setDragging(null);
+
+      try {
+        /*
+         * Both widths, read from the computed style rather than the inline one.
+         *
+         * A column that has never been dragged has no inline value, so reading the element's own
+         * style gives an empty string — and saving that meant dragging one seam wrote a blank
+         * over the other. It self-healed on the next drag, which is exactly the kind of bug that
+         * is never reported and always noticed.
+         */
+        const style = getComputedStyle(box);
+        localStorage.setItem(
+          'datum.layout',
+          JSON.stringify({
+            left: style.getPropertyValue('--ms-left').trim(),
+            right: style.getPropertyValue('--ms-right').trim(),
+          }),
+        );
+      } catch {
+        // Storage denied. The layout still works for this session, which is the part that matters.
+      }
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+  }, []);
+
+  // Restored once, on the element rather than in state: the widths are the browser's business
+  // and re-rendering the whole studio to change a CSS variable would be theatre.
+  useEffect(() => {
+    const box = shell.current;
+    if (!box) return;
+
+    try {
+      const saved = JSON.parse(localStorage.getItem('datum.layout') ?? 'null') as
+        { left?: string; right?: string } | null;
+
+      if (saved?.left) box.style.setProperty('--ms-left', saved.left);
+      if (saved?.right) box.style.setProperty('--ms-right', saved.right);
+    } catch {
+      // A layout that cannot be read is a layout at its default, which is a fine place to start.
+    }
+  }, []);
+
+  /** Lets a stalled download be abandoned, rather than reloading and losing the part. */
+  const depthAbort = useRef<AbortController | null>(null);
   const [showLibrary, setShowLibrary] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -129,6 +231,68 @@ export function ModelStudio() {
           assumedWidthMm / data.width,
           6,
         );
+
+        /*
+         * A picture of a three-dimensional thing goes to a model that can see it.
+         *
+         * Tracing was applied to every image, so a perspective render of a machine came back as
+         * a slab shaped like the outline of the whole photograph — confidently, with no way for
+         * the user to tell it had done the wrong thing. Now the importer says what it sees, and
+         * the picture goes down the route that can actually read it.
+         */
+        /*
+         * The depth model, offered rather than run.
+         *
+         * Shape from shading gives up on anything textured, shiny or side-lit, and says so — the
+         * outline is still built and the surface is flat. A depth model would read that surface,
+         * and it costs a large one-off download, so it is offered at the moment it would help and
+         * never spent without being asked for.
+         */
+        if (r.ok && !useModel.getState().doc.features[0]?.params.reliefField) {
+          setDepthOffer({
+            image: { width: data.width, height: data.height, data: data.data },
+            mmPerPixel: assumedWidthMm / data.width,
+            thickness: 6,
+          });
+        }
+
+        if (!r.ok && r.subject && r.subject.subject !== 'flat-part') {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          /*
+           * A drawing is told to the model as a drawing.
+           *
+           * "Model the object shown in the image" is the wrong instruction for a blueprint: the
+           * image shows four pictures of one object, and a model told to model what it sees can
+           * reasonably answer with four objects. Naming the format is the difference between
+           * reading a drawing and describing a sheet of paper.
+           */
+          const built = await useModel.getState().buildFromImage(
+            bytes, file.type,
+            r.subject.subject === 'drawing'
+              ? 'This is a multi-view engineering drawing: several orthographic views of one '
+                + 'object on one sheet. Read the views together and model the single object they '
+                + 'describe, using the proportions between the views.'
+              : undefined,
+          );
+
+          /*
+           * One message, not two refusals stacked.
+           *
+           * The importer's reason for not tracing it — "this is a scene, not a flat part" — is
+           * how the picture came to be handed to a model in the first place. Repeating it in
+           * front of the model's own answer reads as being told no twice for two different
+           * reasons, when only the second one is now about anything.
+           */
+          if (!built.ok) {
+            if (built.partial) {
+              setPartialOffer({ bytes, type: file.type, why: built.message });
+            } else {
+              note('warn', built.message);
+            }
+          }
+          return;
+        }
+
         // Naming the feature the user has to click matters, because it is not always the
         // same one: a symmetric silhouette comes back as a revolve, not an extrusion.
         const built = useModel.getState().doc.features[0]?.name ?? 'the traced feature';
@@ -174,7 +338,29 @@ export function ModelStudio() {
 
 
   return (
-    <div className="ms">
+    <div className="ms" ref={shell} style={{ position: 'relative' }}>
+      {/*
+        * The seams, draggable.
+        *
+        * Placed over the boundaries rather than between them: given grid columns of their own
+        * they would change the layout they exist to adjust.
+        */}
+      <button
+        type="button"
+        className="ms-split"
+        aria-label="Resize the model tree"
+        data-dragging={dragging === 'left' ? 'true' : undefined}
+        style={{ left: 'clamp(180px, var(--ms-left), 46vw)', transform: 'translateX(-50%)' }}
+        onPointerDown={resizeFrom('left')}
+      />
+      <button
+        type="button"
+        className="ms-split"
+        aria-label="Resize the assistant"
+        data-dragging={dragging === 'right' ? 'true' : undefined}
+        style={{ right: 'clamp(240px, var(--ms-right), 46vw)', transform: 'translateX(50%)' }}
+        onPointerDown={resizeFrom('right')}
+      />
       <aside className="ms-left">
         <div className="st-h">
           Model
@@ -208,6 +394,13 @@ export function ModelStudio() {
           </button>
           <button onClick={() => doExport('stl')} disabled={!hasModel} title="Mesh for 3D printing">STL</button>
           <button onClick={() => doExport('json')} title="Write the feature tree to a file">Save file</button>
+          <button
+            onClick={() => void makeExact()}
+            disabled={!hasModel}
+            title="Rebuild this part with exact surfaces instead of triangles — true blends, exact volume, exact STEP. Downloads a 66 MB kernel the first time."
+          >
+            Exact
+          </button>
           <button
             onClick={() => setShowLibrary(true)}
             title="Save this part where DATUM can find it again, or open one you saved earlier"
@@ -346,6 +539,116 @@ export function ModelStudio() {
           </div>
         </details>
       </aside>
+
+      {/*
+        * The offer to read the picture's depth.
+        *
+        * Stated with the size and the licence before anything is fetched, because the download is
+        * the cost and it belongs to the user. Dismissing it leaves the flat outline that was
+        * already built, which is a perfectly good part.
+        */}
+      {depthOffer && (
+        <div className="ms-offer" role="dialog" aria-label="Read depth from the picture">
+          <strong>This came out flat.</strong>
+          <p>
+            The shading in this picture could not be read as a surface. {DEPTH_MODEL.label} can
+            read its depth instead — about {DEPTH_MODEL.megabytes} MB the first time, downloaded
+            once and kept, run on this machine. Nothing about the picture is uploaded.
+          </p>
+          {depthProgress && <p className="ms-offer-progress">{depthProgress}</p>}
+          <div className="ms-offer-buttons">
+            <button
+              type="button"
+              disabled={depthProgress !== null}
+              onClick={async () => {
+                const offer = depthOffer;
+                setDepthProgress('Fetching the model…');
+
+                depthAbort.current = new AbortController();
+
+                const source = depthAnything({
+                  modelUrl: DEPTH_MODEL.url,
+                  label: DEPTH_MODEL.label,
+                  signal: depthAbort.current.signal,
+                  onProgress: (loaded, total) => setDepthProgress(
+                    total > 0
+                      ? `Fetching the model — ${Math.round((loaded / total) * 100)}%`
+                      : `Fetching the model — ${(loaded / 1e6).toFixed(0)} MB`,
+                  ),
+                });
+
+                const r = await importImageWithDepth(
+                  offer.image, offer.mmPerPixel, offer.thickness, source,
+                );
+
+                setDepthProgress(null);
+                note(r.ok ? 'info' : 'error', r.message);
+
+                /*
+                 * The offer stays up when it failed.
+                 *
+                 * Closed on failure it reads as "done" — the dialog goes, the part is unchanged,
+                 * and nothing on screen says the download was refused. Which is exactly what
+                 * happened the first time this ran against a Content Security Policy that had
+                 * never heard of the model's host.
+                 */
+                if (r.ok) setDepthOffer(null);
+              }}
+            >
+              Read the depth
+            </button>
+            {/*
+              * Always available, including mid-download.
+              *
+              * Disabled while fetching, a stall traps the user: the figure stops moving, the
+              * dialog cannot be dismissed, and the only way out is to reload and lose the part.
+              * Which is exactly what happened the first time this was run against a slow link.
+              */}
+            <button
+              type="button"
+              onClick={() => {
+                depthAbort.current?.abort();
+                depthAbort.current = null;
+                setDepthProgress(null);
+                setDepthOffer(null);
+              }}
+            >
+              {depthProgress === null ? 'Keep it flat' : 'Stop and keep it flat'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {partialOffer && (
+        <div className="ms-offer" role="dialog" aria-label="Build the parts that can be built">
+          <strong>Part of this cannot be built.</strong>
+          <p>{partialOffer.why}</p>
+          <p>
+            The rest of it can be. Building without those parts gives you the components this
+            kernel does make, and what was left out is named on the result.
+          </p>
+          <div className="ms-offer-buttons">
+            <button
+              type="button"
+              disabled={partialBusy}
+              onClick={async () => {
+                setPartialBusy(true);
+                const r = await useModel.getState().buildFromImage(
+                  partialOffer.bytes, partialOffer.type, undefined, true,
+                );
+                setPartialBusy(false);
+                setPartialOffer(null);
+                note(r.ok ? 'info' : 'error', r.message);
+              }}
+            >
+              {partialBusy ? 'Building…' : 'Build what can be built'}
+            </button>
+            <button type="button" onClick={() => setPartialOffer(null)} disabled={partialBusy}>
+              Leave it
+            </button>
+          </div>
+        </div>
+      )}
 
       {showAi && <AiSettings onClose={() => setShowAi(false)} />}
       {showLibrary && <LibraryDialog onClose={() => setShowLibrary(false)} />}

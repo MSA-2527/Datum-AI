@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { checkRequirements, describeChecks, readRequirements, scaleToMeet } from './requirements';
 import { box, cylinder } from '../kernel/ops/build';
+import { generateFromText } from '../generate/parse';
 
 /**
  * Reading what was asked for, and checking whether it was delivered.
@@ -169,5 +170,43 @@ describe('what it says', () => {
   it('names how many came out wrong rather than burying it', () => {
     const checks = checkRequirements(readRequirements('400 mm long'), plate(), 1, 'Steel');
     expect(describeChecks(checks)).toMatch(/1 of 1 did not come out right/);
+  });
+});
+
+/**
+ * "Long" on a part that stands on its axis.
+ *
+ * A pipe, a shaft and a bolt are built up the Z axis, so their length is the Z extent. Reading
+ * it as the larger horizontal extent returned the *diameter*, and the correction pass then
+ * scaled the whole part to close a gap that did not exist — a 60 × 200 pipe came out 200 × 667,
+ * reported as meeting the request it had just broken.
+ */
+describe('what "long" measures', () => {
+  it('reads the axis of a part standing on it', () => {
+    const pipe = generateFromText('a pipe 60 mm od 5 mm wall 200 mm long');
+    expect(pipe.ok).toBe(true);
+    if (!pipe.ok) return;
+
+    const checks = checkRequirements(
+      readRequirements('a pipe 60 mm od 5 mm wall 200 mm long'),
+      pipe.result.mesh, 0, 'Aluminium 6061-T6',
+    );
+
+    const length = checks.find((c) => c.requirement.kind === 'length')!;
+    expect(length.actual).toBeCloseTo(200, 0);
+    expect(length.met).toBe(true);
+    expect(scaleToMeet(checks)).toBeCloseTo(1, 2);
+  });
+
+  it('still means the horizontal extent when a height was stated too', () => {
+    // Z is spoken for by the height, so "long" is the larger of the two horizontal extents.
+    // A 200 x 120 slab standing 400 tall is 200 long, not 400.
+    const checks = checkRequirements(
+      readRequirements('200 mm long 120 mm wide 400 mm tall'),
+      box(200, 120, 400), 0, 'Aluminium 6061-T6',
+    );
+    const length = checks.find((c) => c.requirement.kind === 'length')!;
+    expect(length.actual).toBeCloseTo(200, 0);
+    expect(length.met).toBe(true);
   });
 });

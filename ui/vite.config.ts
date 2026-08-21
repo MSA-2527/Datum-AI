@@ -21,6 +21,15 @@ export default defineConfig({
   test: {
     // jsdom because persistence touches localStorage and the exporters touch Blob/URL.
     environment: 'jsdom',
+    /*
+     * The exact-kernel tests run in Node instead.
+     *
+     * OpenCascade is 66 MB of WebAssembly, and instantiating it inside a jsdom worker exhausts
+     * the worker and takes the whole run down with it — the suite reported no tests at all
+     * rather than a failure, which is the worst way to find out. It needs none of jsdom, so it
+     * runs where it fits.
+     */
+    environmentMatchGlobs: [['src/kernel/brep/**', 'node']],
     include: ['src/**/*.test.ts'],
     // The readable report is excluded from the ordinary suite — it asserts nothing and would
     // print a table on every commit. `npm run eval` runs it through `vitest.eval.config.ts`.

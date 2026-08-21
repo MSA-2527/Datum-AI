@@ -616,6 +616,93 @@ export function halfProfile(loop: Vec2[], axisX: number): Vec2[] {
 
 // ── the pipeline ─────────────────────────────────────────────────────────────
 
+/**
+ * Which pixels are the subject, by the same rule the tracer itself uses.
+ *
+ * Extracted so that anything wanting to reason about the subject — how much interior detail it
+ * has, how many separate objects are in frame — reasons about *the same pixels that would be
+ * traced*. Two modules deciding independently what counts as foreground is two answers to one
+ * question, and the one that reaches the user is whichever ran last.
+ */
+export function foregroundMask(img: RasterImage, opts: Partial<TraceOptions> = {}): Uint8Array {
+  const gray = luminance(img);
+  const thresholdAuto = opts.threshold === undefined;
+  const threshold = opts.threshold ?? otsuThreshold(gray);
+  const mask = new Uint8Array(gray.length);
+
+  if (thresholdAuto && !opts.invert) {
+    // Separated from the background rather than by a brightness cut, which is the only way a
+    // shaded object survives: see `backgroundMask`.
+    const byBackground = backgroundMask(gray, img.width, img.height);
+
+    let covered = 0;
+    for (const v of byBackground) covered += v;
+    const share = covered / byBackground.length;
+
+    // Trusted when it found a plausible object. A background model that selects almost nothing
+    // or almost everything has been defeated — a picture with no clear background, or one
+    // cropped tight to the part — and the brightness cut is the better fallback.
+    if (share > 0.005 && share < 0.9) {
+      mask.set(byBackground);
+      for (const v of mask) if (v) return mask;
+    }
+  }
+
+  for (let i = 0; i < gray.length; i++) {
+    const dark = gray[i]! <= threshold;
+    mask[i] = (opts.invert ? !dark : dark) ? 1 : 0;
+  }
+  return mask;
+}
+
+/**
+ * Every closed loop in a picture, in millimetres, without deciding what they mean.
+ *
+ * `traceImage` answers "what one part is this a picture of" and returns a single profile with
+ * its holes. That is the right answer for a photograph of a gasket and the wrong question
+ * entirely for an engineering drawing, which is several pictures of *one* object laid out on a
+ * sheet — front here, top below it, right beside it — and whose meaning is in how the views
+ * relate rather than in any one outline.
+ *
+ * So this stops before the interpreting. It hands back the loops and lets the drawing
+ * reconstructor cluster them into views, work out which view is which, and intersect them —
+ * which is machinery that already exists and has always been reachable only from DXF. A scan or
+ * a photograph of the same drawing had no way in at all.
+ *
+ * Loops are returned in sheet coordinates with Y running up, because that is what every drawing
+ * convention and the reconstructor both assume, and image rows run the other way.
+ */
+export function traceLoops(
+  img: RasterImage, opts: TraceOptions,
+): { loops: Vec2[][]; widthMm: number; heightMm: number } | { error: string } {
+  if (img.width < 8 || img.height < 8) {
+    return { error: `The image is only ${img.width} x ${img.height} pixels, which is too small to trace.` };
+  }
+
+  const mask = foregroundMask(img, opts);
+  const minArea = opts.minAreaPx ?? Math.max(16, (img.width * img.height) / 20_000);
+  const contours = traceContours(mask, img.width, img.height, minArea);
+
+  if (contours.length === 0) return { error: 'Nothing was found to trace.' };
+
+  const mm = opts.mmPerPixel;
+  const simplify = opts.simplifyMm ?? mm * 1.5;
+  const heightMm = img.height * mm;
+
+  const loops = contours
+    .map((c) => simplifyLoop(
+      // Flipped to sheet coordinates on the way out, once, here — rather than leaving every
+      // caller to remember that a picture counts rows downward and a drawing counts up.
+      c.points.map(([x, y]) => [x * mm, heightMm - y * mm] as Vec2),
+      simplify,
+    ))
+    .filter((loop) => loop.length >= 3);
+
+  if (loops.length === 0) return { error: 'No closed outline survived simplification.' };
+
+  return { loops, widthMm: img.width * mm, heightMm };
+}
+
 export function traceImage(img: RasterImage, opts: TraceOptions): TracedShape | { error: string } {
   const warnings: string[] = [];
 
@@ -635,32 +722,7 @@ export function traceImage(img: RasterImage, opts: TraceOptions): TracedShape | 
   const thresholdAuto = opts.threshold === undefined;
   const threshold = opts.threshold ?? otsuThreshold(gray);
 
-  const mask = new Uint8Array(gray.length);
-
-  if (thresholdAuto && !opts.invert) {
-    // Separated from the background rather than by a brightness cut, which is the only way a
-    // shaded object survives: see `backgroundMask`.
-    const byBackground = backgroundMask(gray, img.width, img.height);
-
-    let covered = 0;
-    for (const v of byBackground) covered += v;
-    const share = covered / byBackground.length;
-
-    // Trusted when it found a plausible object. A background model that selects almost nothing
-    // or almost everything has been defeated — a picture with no clear background, or one
-    // cropped tight to the part — and the brightness cut is the better fallback.
-    if (share > 0.005 && share < 0.9) mask.set(byBackground);
-  }
-
-  let anyFromBackground = false;
-  for (const v of mask) if (v) { anyFromBackground = true; break; }
-
-  if (!anyFromBackground) {
-    for (let i = 0; i < gray.length; i++) {
-      const dark = gray[i] <= threshold;
-      mask[i] = (opts.invert ? !dark : dark) ? 1 : 0;
-    }
-  }
+  const mask = foregroundMask(img, opts);
 
   let filled = 0;
   for (const v of mask) filled += v;

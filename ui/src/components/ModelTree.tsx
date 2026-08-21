@@ -25,7 +25,13 @@ import { ParametersPanel } from './ParametersPanel';
  * between changing a number and seeing what it does.
  */
 
-const KINDS: { kind: FeatureKind; label: string; glyph: string; hint: string }[] = [
+/**
+ * Every feature the kernel can build, in the order a part is usually made.
+ *
+ * Exported because the command palette offers the same list: one definition, so a feature
+ * added here is reachable from the keyboard without anyone remembering to add it twice.
+ */
+export const KINDS: { kind: FeatureKind; label: string; glyph: string; hint: string }[] = [
   { kind: 'box', label: 'Box', glyph: '▭', hint: 'Rectangular block' },
   { kind: 'cylinder', label: 'Cylinder', glyph: '⬭', hint: 'Cylinder or disc' },
   { kind: 'sphere', label: 'Sphere', glyph: '◯', hint: 'Sphere' },
@@ -41,6 +47,7 @@ const KINDS: { kind: FeatureKind; label: string; glyph: string; hint: string }[]
   { kind: 'split', label: 'Split', glyph: '◫', hint: 'Cut the solid into two bodies with a plane' },
   { kind: 'datum', label: 'Datum', glyph: '⌗', hint: 'A reference plane to build on, offset or tilted' },
   { kind: 'wrap', label: 'Wrap', glyph: '◎', hint: 'Knurl, groove or flats rolled around a round part' },
+  { kind: 'sheet', label: 'Sheet metal', glyph: '⌐', hint: 'A folded sheet part — angle, channel or Z' },
   { kind: 'pocket', label: 'Pocket', glyph: '▣', hint: 'Mill a pocket' },
   { kind: 'slot', label: 'Slot', glyph: '▬', hint: 'Cut a slot' },
   { kind: 'fillet', label: 'Fillet', glyph: '◜', hint: 'Round sharp edges' },

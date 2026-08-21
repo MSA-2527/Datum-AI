@@ -84,6 +84,12 @@ export function Assistant({ starters }: { starters?: string[] }) {
     // duplicate keys and was entitled to drop or duplicate a message in the transcript.
     const id = ++messageId;
     setMessages((m) => [...m, { id, from, text, tone }]);
+
+    // The notice band and the transcript are two places to show one sentence, and the store
+    // writes to the band on every build because the toolbar has no transcript to write to.
+    // Once the chat has said it, the band would repeat it verbatim directly underneath —
+    // which reads as the assistant having answered twice.
+    if (from === 'app') useModel.setState({ notice: null });
   }, []);
 
   // Follow the conversation only when already at the bottom, so reading back through history

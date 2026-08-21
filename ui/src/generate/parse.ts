@@ -87,12 +87,42 @@ export function findMeasures(text: string): Measure[] {
   const plain = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${unitAlt}|"|')?`, 'gi');
   while ((m = plain.exec(text)) !== null) {
     if (out.some((o) => m!.index >= o.index && m!.index < o.index + o.raw.length)) continue;
+
+    /*
+     * A number welded to a letter is part of a designation, not a measurement.
+     *
+     * "Two M8 feet holes" gave a ⌀2438.4 mm hole in an 80 mm block: the 8 of M8 was read as a
+     * free number, the word after it was "feet", and eight feet is 2438.4 mm. The block did
+     * not close, which is the only reason anyone noticed. M8, M10, R5, A36 — the digits belong
+     * to the token, and a designation is handled by `applyFastenerDesignation`, not here.
+     */
+    const before = m.index > 0 ? text[m.index - 1]! : ' ';
+    if (/[A-Za-z]/.test(before)) continue;
+
     const unit = m[2]?.toLowerCase();
+
+    /*
+     * "Feet" is a unit only where a unit can stand.
+     *
+     * It is also the commonest word in mechanical English for the parts a thing stands on, and
+     * the two readings differ by a factor of three hundred. A unit is followed by nothing, by
+     * punctuation, or by a word about size; a plural noun is followed by whatever it belongs to.
+     */
+    if (unit && FOOT_WORDS.has(unit)) {
+      const after = text.slice(m.index + m[0].length).trimStart();
+      if (after.length > 0 && !/^[,.;:)]|^(?:long|wide|tall|high|deep|across|of|by|and|or)\b/i.test(after)) {
+        continue;
+      }
+    }
+
     out.push({ mm: parseFloat(m[1]) * (unit ? UNIT_TO_MM[unit] ?? 1 : 1), raw: m[0].trim(), index: m.index });
   }
 
   return out.sort((a, b) => a.index - b.index);
 }
+
+/** The words for a foot, which is also a part a machine stands on. */
+const FOOT_WORDS = new Set(['ft', 'foot', 'feet']);
 
 // ── parameter keywords ───────────────────────────────────────────────────────
 
@@ -104,6 +134,10 @@ const KEYWORDS: { words: string[]; keys: string[] }[] = [
   { words: ['outer diameter', 'outside diameter', 'od'], keys: ['outerDia', 'bodyDia', 'diameter'] },
   { words: ['inner diameter', 'inside diameter', 'id', 'bore diameter', 'bore'], keys: ['boreDia', 'neckDia'] },
   { words: ['bolt circle', 'pitch circle', 'pcd'], keys: ['boltCircle'] },
+  // Before the generic diameter entry, so "9 mm holes" sizes the holes rather than the body.
+  // Without it a plate asked for 13 mm holes was built with its default 9 mm ones and said
+  // nothing — the number is plausible, which is what makes it worth catching.
+  { words: ['hole diameter', 'hole size', 'hole'], keys: ['holeDia', 'holeDiameter'] },
   { words: ['wall thickness', 'wall'], keys: ['wall'] },
   { words: ['base thickness', 'floor thickness', 'base'], keys: ['baseThickness'] },
   { words: ['face width'], keys: ['faceWidth'] },
@@ -114,7 +148,10 @@ const KEYWORDS: { words: string[]; keys: string[] }[] = [
   { words: ['diameter', 'dia', 'across'], keys: ['diameter', 'outerDia', 'bodyDia', 'acrossFlats'] },
   { words: ['radius'], keys: ['radius'] },
   { words: ['height', 'tall', 'high'], keys: ['height', 'length'] },
-  { words: ['length', 'long'], keys: ['length', 'height'] },
+  // `thickness` last: it is only reached by an archetype that has neither a length nor a
+  // height, which is exactly the flat, turned kind — a washer, a shim, a spacer — where "12 mm
+  // long" means its thickness and was previously read as nothing at all.
+  { words: ['length', 'long'], keys: ['length', 'height', 'thickness'] },
   { words: ['width', 'wide'], keys: ['width'] },
   { words: ['depth', 'deep'], keys: ['depth', 'grooveDepth', 'keywayDepth'] },
   { words: ['teeth', 'tooth'], keys: ['teeth'] },
@@ -152,6 +189,150 @@ function negatedAt(lower: string, at: number): boolean {
 
 /** Words that introduce a part of the thing, rather than the thing. */
 const ATTACHMENTS = [' with ', ' and ', ' plus ', ' having ', ' including '];
+
+/**
+ * Words that end the *head* of a request and begin a qualifier.
+ *
+ * "A crankshaft for a 4 cylinder engine" asks for a crankshaft. Everything after "for" says
+ * what the crankshaft is for, and the nouns in it are not the thing being requested — but a
+ * parser that scores every word in the sentence equally will happily pick "cylinder" out of
+ * the qualifier and build one, because "cylinder" is a longer alias than "engine". The user
+ * gets a plain cylinder and a message saying "Built a cylinder", which is the worst possible
+ * outcome: confidently wrong, and indistinguishable at a glance from having worked.
+ */
+const HEAD_BOUNDARIES = [
+  ' with ', ' without ', ' for ', ' and ', ' plus ', ' having ', ' including ',
+  ' that ', ' which ', ' to fit ', ' to suit ', ' from ', ' using ', ' made ',
+  ' on ', ' in ', ' at ', ' per ', ' so ', ' but ',
+];
+
+/**
+ * Nouns that stand in for the real subject: "a model of a car" is a request for a car.
+ * Their presence as a head noun means the head is really whatever follows "of".
+ */
+const TRANSPARENT_HEADS = new Set([
+  'model', 'part', 'design', 'drawing', 'cad', 'shape', 'object', 'component',
+  'thing', 'version', 'copy', 'render', 'sketch', 'file', 'solid', 'body',
+]);
+
+/**
+ * Trailing words that qualify a head noun rather than being one: units, bare numbers,
+ * designations and the dimension adjectives that follow a size.
+ *
+ * "Make a cup 90 mm tall" still has "cup" as its head; the three words after it are the size.
+ */
+const TRAILING_QUALIFIERS = new Set([
+  ...Object.keys(UNIT_TO_MM),
+  // Every word that names a *parameter* names a dimension of the head noun, never the head
+  // noun itself. Taking them from the same table the sizer uses means the two cannot drift.
+  ...KEYWORDS.flatMap((k) => k.words).flatMap((w) => w.split(' ')),
+  'tall', 'high', 'long', 'wide', 'deep', 'thick', 'across', 'square', 'round',
+  'x', '×', 'by', 'degree', 'degrees', 'deg', 'off', 'free', 'overall', 'each',
+  'arm', 'spine', 'tier', 'tiers', 'pitch', 'stroke', 'lift', 'wire', 'size',
+  // Politeness and filler, which trail a request often enough to matter.
+  'please', 'thanks', 'thank', 'you', 'now', 'ok', 'okay', 'asap',
+  // Product variant words. "iPhone 15 Pro Max" is a request for an iPhone; "Pro" and "Max"
+  // grade it, and none of them is the name of a mechanical part.
+  'pro', 'max', 'plus', 'mini', 'air', 'ultra', 'lite', 'se', 'xl', 'gen',
+]);
+
+/** True for a token that carries no noun meaning: a number, a size code, punctuation. */
+function isQualifierToken(token: string): boolean {
+  if (token.length === 0) return true;
+  if (TRAILING_QUALIFIERS.has(token)) return true;
+  // 6205, m10, 1/4, 08b, htd5m — a designation or a measurement, never the head noun.
+  return /^[\d./]+$/.test(token) || /^[a-z]{0,3}\d/.test(token);
+}
+
+/**
+ * The words the request is actually about, in order.
+ *
+ * Everything after a qualifier boundary is cut away first: "a crankshaft for a 4 cylinder
+ * engine" reduces to "crankshaft", because the cylinder and the engine are what the
+ * crankshaft is *for*, not what was asked for. Articles and the imperative go too, so
+ * "please make me a cup" reduces to "cup".
+ */
+export function headTokens(text: string): string[] {
+  let phrase = ` ${text.toLowerCase().trim()} `;
+
+  const cut = phrase.search(/[,;.:(]/);
+  if (cut > 0) phrase = `${phrase.slice(0, cut)} `;
+  for (const b of HEAD_BOUNDARIES) {
+    const at = phrase.indexOf(b);
+    if (at > 0) phrase = `${phrase.slice(0, at)} `;
+  }
+
+  for (let pass = 0; pass < 2; pass++) {
+    const words = phrase
+      .replace(/^\s*(please\s+)?(make|model|build|create|design|draw|generate|give|show|produce|need|want|get)\s+(me\s+)?/, ' ')
+      .replace(/\s(a|an|the|some|my|this|that|of|new)\s/g, ' ')
+      .replace(/\s(a|an|the|some|my|this|that|of|new)\s/g, ' ')
+      .split(/[^a-z0-9\/.×"'-]+/)
+      .filter((w) => w.length > 0);
+
+    // "A model of a car" — the last word stands in for the real subject, so re-read from
+    // after "of" and take the noun that follows.
+    const last = words[words.length - 1] ?? '';
+    if (pass === 0 && TRANSPARENT_HEADS.has(last.replace(/[^a-z-]/g, ''))) {
+      const of = phrase.indexOf(' of ');
+      if (of >= 0) { phrase = ` ${phrase.slice(of + 4)} `; continue; }
+    }
+    return words;
+  }
+  return [];
+}
+
+/**
+ * The single noun a request is about, or '' when there is no identifiable one.
+ *
+ * English compound nouns are head-final — a "socket head cap screw" is a screw, a "ball
+ * bearing" is a bearing — so the head is the last real word. `isKnown` lets the caller stop
+ * the walk early on a word it recognises, which is what keeps a designation like "HTD 5M"
+ * from being mistaken for the head of "timing belt pulley 20 teeth HTD 5M".
+ */
+export function headNoun(text: string, isKnown: (word: string) => boolean = () => false): string {
+  const words = headTokens(text);
+  let afterDesignation = false;
+
+  for (let i = words.length - 1; i >= 0; i--) {
+    const raw = words[i]!;
+    const word = raw.replace(/[^a-z-]/g, '');
+
+    if (word.length > 0 && isKnown(word)) return word;
+
+    if (isQualifierToken(raw)) {
+      // Only a token mixing letters and digits puts the walk into designation territory —
+      // "5M", "M10", "08B". A plain measurement does not, so "cup" is still the head of
+      // "a cup 90 mm tall".
+      if (/[a-z]/.test(raw) && /\d/.test(raw)) afterDesignation = true;
+      continue;
+    }
+
+    // A short alphabetic run *inside* a designation is part of it, not the head noun: the
+    // "HTD" of "HTD 5M", the "ISO" of "ISO 4762". Standing alone it is a noun like any
+    // other — "rib", "nut", "car" — and the walk stops there, which is the whole point: an
+    // unrecognised head noun becomes a refusal rather than a silently different part.
+    if (word.length <= 3 && afterDesignation) continue;
+
+    return word;
+  }
+  return '';
+}
+
+/**
+ * True when `alias` is a name for the thing `head` names.
+ *
+ * Head-final again: the multi-word alias "hex nut" names a nut, so it satisfies the head
+ * "nut". Plurals are matched because a request is as often plural as not.
+ */
+function aliasNames(alias: string, head: string): boolean {
+  const last = alias.trim().split(/\s+/).pop() ?? '';
+  return last === head
+    || `${last}s` === head
+    || last === `${head}s`
+    || (head.length > 4 && (last === head.replace(/s$/, '') || last.replace(/s$/, '') === head));
+}
+
 
 /** True when the word at `at` is introduced as an attachment to something already named. */
 function attachedAt(lower: string, at: number): boolean {
@@ -195,6 +376,47 @@ export function parseRequest(text: string): ParseResult | ParseFailure {
         `Try naming one directly — for example "make a cup", "M10 hex nut", or ` +
         `"200 x 120 x 8 plate with 9 mm holes".`,
     };
+  }
+
+  /*
+   * The head-noun gate.
+   *
+   * Scoring alone will match any alias anywhere in the sentence, which is right for
+   * "200 x 120 x 8 plate with 9 mm holes" and catastrophic for "a crankshaft for a 4
+   * cylinder engine" — the latter scores `cylinder` out of a subordinate clause and builds
+   * a plain cylinder, announced as a success. A CAD tool that answers the wrong question
+   * confidently is worse than one that answers nothing: the user has no signal that the
+   * geometry on screen is not the part they asked for.
+   *
+   * So the winner must be a name for the thing the request is actually about. When the head
+   * noun is identifiable and no archetype names it, the request is refused and the head noun
+   * is quoted back, which is the one piece of information that tells the user why.
+   */
+  const names = (word: string) =>
+    ARCHETYPES.some((a) => a.aliases.some((alias) => aliasNames(alias, word)));
+  const head = headNoun(text, names);
+
+  if (head.length > 2) {
+    const named = scored.filter((s) => s.a.aliases.some((alias) => aliasNames(alias, head)));
+
+    if (named.length === 0) {
+      return {
+        archetype: null,
+        suggestions: scored.slice(0, 6).map((s) => ({ id: s.a.id, label: s.a.label, score: s.score })),
+        message:
+          `There is no "${head}" in the catalogue, and building the nearest thing to it ` +
+          `would give you a part you did not ask for. ` +
+          (scored.length > 0
+            ? `The closest shapes it does have are ${scored.slice(0, 3).map((s) => s.a.label).join(', ')}. `
+            : '') +
+          `Name one of those directly, or model the ${head} from features — sketch, extrude, ` +
+          `revolve, sweep and loft are all on the toolbar.`,
+      };
+    }
+
+    // Re-rank so the archetype that names the head wins, whatever else the sentence mentions.
+    scored.length = 0;
+    scored.push(...named);
   }
 
   const archetype = scored[0].a;

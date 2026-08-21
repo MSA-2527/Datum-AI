@@ -1,5 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useStore } from '../store';
+import { useModel } from '../modelStore';
+import { triCount } from '../engine';
+import type { Document, EvaluatedDocument } from '../model/document';
 import type { FeatureNode } from '../types';
 import { Viewport } from './Viewport';
 
@@ -261,11 +264,118 @@ function findingsFor(features: FeatureNode[]): Finding[] {
   return out;
 }
 
-export function HealthTab() {
-  const ctx = useStore((s) => s.context);
-  const findings = useMemo(() => findingsFor(ctx?.features ?? []), [ctx?.features]);
+/**
+ * The findings the evaluator and the kernel already know about the open document.
+ *
+ * Nothing is inferred here. A feature error is one the evaluator recorded while rebuilding
+ * that feature; a solid that is not closed is one the kernel measured as not closed. Both are
+ * facts about the part in the viewport, which is what a health panel has to be.
+ */
+function findingsForDocument(doc: Document, evaluated: EvaluatedDocument): Finding[] {
+  const out: Finding[] = [];
+  const nameOf = (id: string) => doc.features.find((f) => f.id === id)?.name ?? 'A feature';
 
-  if (!ctx) return <div className="empty">Open a document to run the linter.</div>;
+  for (const [id, message] of evaluated.errors) {
+    out.push({
+      id: `${id}-err`,
+      severity: 'err',
+      rule: 'datum.feature.rebuild',
+      what: `${nameOf(id)} failed to rebuild.`,
+      why: `${message} A feature that failed contributes no geometry, and everything after it was built on what came before instead.`,
+    });
+  }
+
+  for (const [id, message] of evaluated.warnings) {
+    out.push({
+      id: `${id}-warn`,
+      severity: 'warn',
+      rule: 'datum.feature.adjusted',
+      what: `${nameOf(id)} did not build as asked.`,
+      why: message,
+    });
+  }
+
+  const h = evaluated.health;
+
+  // Closure is the one that decides whether the part is manufacturable at all: an open surface
+  // has no inside, so it has no volume, no mass and nothing a machine can be told to cut.
+  if (!h.closed) {
+    out.push({
+      id: 'solid-open',
+      severity: 'err',
+      rule: 'datum.solid.closed',
+      what: `The solid is not closed — ${h.boundaryEdges} boundary edge${h.boundaryEdges === 1 ? '' : 's'}.`,
+      why: 'An open surface encloses no volume, so mass, centre of mass and any cost derived from them are undefined, and no CAM package will accept it.',
+    });
+  }
+
+  if (!h.manifold) {
+    out.push({
+      id: 'solid-nonmanifold',
+      severity: 'err',
+      rule: 'datum.solid.manifold',
+      what: `${h.nonManifoldEdges} edge${h.nonManifoldEdges === 1 ? '' : 's'} join more than two faces.`,
+      why: 'A non-manifold edge is a place where the solid touches itself. Booleans, offsets and shelling are all undefined across one.',
+    });
+  }
+
+  if (h.closed && h.manifold && h.genus > 0) {
+    out.push({
+      id: 'solid-genus',
+      severity: 'warn',
+      rule: 'datum.solid.genus',
+      what: `The solid has ${h.genus} through-feature${h.genus === 1 ? '' : 's'} (Euler characteristic ${h.euler}).`,
+      why: 'Stated rather than flagged: a plate with four bolt holes is genus 4 and entirely correct. It is worth checking against the number of through-holes the design intends.',
+    });
+  }
+
+  if (out.length === 0) {
+    return [];
+  }
+
+  return out;
+}
+
+export function HealthTab() {
+  /*
+   * The health of the part on screen.
+   *
+   * This read `context.features` — the SOLIDWORKS feature list, which standalone is the sample
+   * bracket invented at boot. So a cup on screen was reported as having an under-defined
+   * "Sketch1" it does not contain, with a Fix button that had no handler behind it. Two
+   * failures in one panel: the wrong document, and a control that does nothing.
+   *
+   * The evaluator already produces the real answer. It records an error or a warning against
+   * the feature that caused it on every rebuild, and the kernel checks the finished solid for
+   * closure, manifoldness and Euler characteristic — which is the check that actually decides
+   * whether a part can be manufactured, because an open solid has no volume and no mass.
+   *
+   * The SOLIDWORKS linter is kept for when a seat is attached and there is a real feature list
+   * to lint.
+   */
+  const ctx = useStore((s) => s.context);
+  const demo = useStore((s) => s.demo);
+  const doc = useModel((s) => s.doc);
+  const evaluated = useModel((s) => s.evaluated);
+
+  const findings = useMemo(
+    () => (demo
+      ? findingsForDocument(doc, evaluated)
+      : findingsFor(ctx?.features ?? [])),
+    [demo, doc, evaluated, ctx?.features],
+  );
+
+  if (demo && triCount(evaluated.mesh) === 0) {
+    return (
+      <div className="empty">
+        <strong>Nothing to check</strong>
+        Health is measured off the solid. Describe a part in the chat, or add a feature from
+        the Model Explorer.
+      </div>
+    );
+  }
+
+  if (!demo && !ctx) return <div className="empty">Open a document to run the linter.</div>;
 
   return (
     <div className="tabc">
@@ -283,11 +393,15 @@ export function HealthTab() {
             </div>
             <p>{f.what}</p>
             <div className="why">{f.why}</div>
+            {/*
+              The remedy, as text.
+
+              It was two buttons — the fix and a suppression dialogue — and neither had a
+              handler behind it. A control that looks like it acts and does not is worse than
+              the sentence it was hiding, because the user spends the click before finding out.
+            */}
             {f.fix && (
-              <div className="fa">
-                <button className="btn determ">{f.fix}</button>
-                <button className="btn ghost">Suppress…</button>
-              </div>
+              <div className="why" style={{ marginTop: 5, color: 'var(--det)' }}>→ {f.fix}</div>
             )}
           </div>
         ))

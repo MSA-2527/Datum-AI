@@ -9,11 +9,27 @@ import type { PartDoc } from './partModel';
  * here is ever presented as live model state.
  */
 
-export const demoProviders: Provider[] = [
-  { id: 'local', model: 'qwen2.5-coder-14b-instruct', kind: 'Local', available: true, maxReliableOps: 8 },
-  { id: 'byo-anthropic', model: 'claude-sonnet-5', kind: 'ByoKey', available: true, maxReliableOps: 200 },
-  { id: 'pro', model: 'claude-opus-5', kind: 'Managed', available: true, maxReliableOps: 200 },
-];
+/**
+ * The planners the panel can offer.
+ *
+ * `available` is *not* a catalogue flag: the header chip reads it to tell the user whether a
+ * model is attached, and it was hardcoded true for all three, so a fresh install with no key
+ * and no endpoint announced "Local · qwen 14b" in the one place that is supposed to say where
+ * their geometry is going. Availability is now read from the configuration the user actually
+ * saved, and an unconfigured install correctly shows no planner.
+ */
+export function providersFor(config: { id: string; apiKey: string; model: string }): Provider[] {
+  const configured = (id: string) =>
+    config.id === id && (id === 'local' || config.apiKey.trim().length > 0);
+
+  return [
+    { id: 'local', model: config.id === 'local' && config.model ? config.model : 'local model',
+      kind: 'Local', available: configured('local'), maxReliableOps: 8 },
+    { id: 'byo-anthropic', model: config.id === 'anthropic' && config.model ? config.model : 'claude-sonnet-5',
+      kind: 'ByoKey', available: config.id === 'anthropic' && config.apiKey.trim().length > 0, maxReliableOps: 200 },
+    { id: 'pro', model: 'claude-opus-5', kind: 'Managed', available: false, maxReliableOps: 200 },
+  ];
+}
 
 export function newDemoDoc(): PartDoc {
   return {

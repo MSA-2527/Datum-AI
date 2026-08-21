@@ -2212,14 +2212,58 @@ select:focus {
 
 /* ── model studio layout ────────────────────────────────────────────────── */
 
+/*
+ * The three columns, sized by variables so they can be dragged.
+ *
+ * Fixed at 320 and 340, the tree and the assistant were whatever somebody once decided, and a
+ * user reading a long feature tree on a laptop had no way to give it room except to make the
+ * window bigger. The widths live in custom properties, the splitters write to them, and the
+ * clamps here are what stops a column being dragged out of existence and left unrecoverable.
+ */
 .ms {
+  --ms-left: 320px;
+  --ms-right: 340px;
+
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr) 340px;
+  grid-template-columns:
+    clamp(180px, var(--ms-left), 46vw)
+    minmax(0, 1fr)
+    clamp(240px, var(--ms-right), 46vw);
   height: 100vh;
   min-height: 0;
   overflow: hidden;
   background: var(--bg-0, #0b0d12);
 }
+
+/*
+ * A splitter, laid over the seam rather than occupying a column of its own.
+ *
+ * Given its own grid column it would change the layout it exists to adjust, and every rule that
+ * refers to the three columns by position would have to know about it. Absolutely positioned on
+ * the seam, it is invisible to the grid and eight pixels wide to the pointer — which is the
+ * width a seam has to be to be grabbable without being seen.
+ */
+.ms-split {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  z-index: 6;
+  cursor: col-resize;
+  background: transparent;
+  border: none;
+  padding: 0;
+  touch-action: none;
+}
+.ms-split::after {
+  content: '';
+  position: absolute;
+  inset: 0 4px;
+  background: transparent;
+  transition: background 100ms ease;
+}
+.ms-split:hover::after,
+.ms-split[data-dragging='true']::after { background: var(--accent, #4a9eff); }
 
 .ms-left, .ms-right {
   display: flex;
@@ -3395,3 +3439,259 @@ select:focus {
   padding: 4px 10px; border-radius: 4px; font-size: 12px; font-variant-numeric: tabular-nums;
   background: var(--acc, #4a9eff); color: #fff; pointer-events: none;
 }
+
+/* A sketch point you can grab. */
+.sk-point.is-grabbable { cursor: grab; }
+.sk-point.is-grabbable:active { cursor: grabbing; }
+.sk-point.is-grabbable:hover { r: 1.8; }
+
+/* ── viewport furniture: modes, view cube, triad, scale bar ──────────────────
+ *
+ * All of it sits over the canvas and none of it is in the scene. Pointer events are off
+ * everywhere except the cube, which is the one piece meant to be clicked — an overlay that
+ * quietly eats drags is a viewport that stops orbiting near its own corners.
+ */
+
+.vp3d-modes {
+  position: absolute;
+  top: 42px;
+  right: 10px;
+  display: flex;
+  gap: 4px;
+  z-index: 2;
+}
+.vp3d-modes button {
+  min-width: 34px;
+  height: 26px;
+  padding: 0 6px;
+  font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  color: var(--fg-2, #b6bdcb);
+  background: rgba(20, 24, 33, 0.82);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 5px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+.vp3d-modes button:hover { color: var(--fg-1, #e6e9ef); border-color: var(--accent, #4a9eff); }
+.vp3d-modes button[aria-pressed='true'] {
+  color: #fff;
+  background: var(--accent, #4a9eff);
+  border-color: var(--accent, #4a9eff);
+}
+
+.vp3d-cube {
+  position: absolute;
+  top: 76px;
+  right: 10px;
+  width: 84px;
+  height: 84px;
+  z-index: 2;
+  cursor: pointer;
+  overflow: visible;
+}
+.vp3d-cube-face {
+  fill: var(--fg-3, #8b93a3);
+  stroke: var(--fg-2, #b6bdcb);
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+  transition: fill 90ms ease;
+}
+.vp3d-cube:hover .vp3d-cube-face.is-front { fill: var(--accent, #4a9eff); }
+.vp3d-cube-label {
+  fill: var(--bg-0, #0e1116);
+  font: 700 7px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+  letter-spacing: 0.04em;
+}
+
+.vp3d-triad {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  width: 76px;
+  height: 76px;
+  z-index: 2;
+  pointer-events: none;
+  overflow: visible;
+}
+.vp3d-axis { stroke-width: 2; stroke-linecap: round; }
+.vp3d-axis-x { stroke: #e5484d; }
+.vp3d-axis-y { stroke: #46a758; }
+.vp3d-axis-z { stroke: #4a9eff; }
+.vp3d-axis-label {
+  fill: var(--fg-2, #b6bdcb);
+  font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.vp3d-scale {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 2;
+  pointer-events: none;
+}
+.vp3d-scale-bar {
+  height: 6px;
+  border: 1px solid var(--fg-3, #8b93a3);
+  border-top: none;
+  display: inline-block;
+}
+.vp3d-scale-label {
+  font: 500 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg-2, #b6bdcb);
+}
+
+.vp3d-measure {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  width: 100%;
+  height: 100%;
+}
+.vp3d-measure-line {
+  stroke: #ffae57;
+  stroke-width: 2;
+  stroke-dasharray: 8 6;
+  vector-effect: non-scaling-stroke;
+}
+.vp3d-measure-end {
+  fill: #ffae57;
+  stroke: rgba(20, 24, 33, 0.9);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.vp3d-measure-readout {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 7px 14px;
+  z-index: 3;
+  background: rgba(20, 24, 33, 0.9);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 6px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+.vp3d-measure-readout strong {
+  font: 700 15px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #ffae57;
+}
+.vp3d-measure-readout span {
+  font: 500 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg-2, #b6bdcb);
+}
+.vp3d-measure-readout .vp3d-measure-what { color: var(--fg-3, #8b93a3); font-size: 10px; }
+
+/* The move-and-turn gizmo. Axis colours match the triad, because they are the same axes. */
+.vp3d-gizmo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+}
+.vp3d-giz line { stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+.vp3d-giz circle { stroke: rgba(20, 24, 33, 0.85); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.vp3d-giz-turn { fill: none !important; stroke-width: 2.5 !important; stroke-dasharray: 4 3; }
+.vp3d-giz-x line, .vp3d-giz-x .vp3d-giz-turn { stroke: #e5484d; }
+.vp3d-giz-x circle { fill: #e5484d; }
+.vp3d-giz-y line, .vp3d-giz-y .vp3d-giz-turn { stroke: #46a758; }
+.vp3d-giz-y circle { fill: #46a758; }
+.vp3d-giz-z line, .vp3d-giz-z .vp3d-giz-turn { stroke: #4a9eff; }
+.vp3d-giz-z circle { fill: #4a9eff; }
+
+/* The sketch, docked over the viewport rather than beside it.
+ *
+ * The 3D view stays behind and visible: a sketch is nearly always drawn in relation to geometry
+ * that is already there, and hiding the part to draw on it defeats the purpose.
+ */
+.mv-sketching {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+}
+.mv-sketching > .vp3d { flex: 1 1 auto; }
+.mv-sketch-pane {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(520px, 62%);
+  display: flex;
+  flex-direction: column;
+  z-index: 4;
+  background: color-mix(in srgb, var(--bg-1, #14181f) 94%, transparent);
+  border-left: 1px solid var(--line, #262c38);
+  backdrop-filter: blur(8px);
+  overflow: auto;
+}
+.mv-sketch-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line, #262c38);
+}
+.mv-sketch-head strong { font-size: 13px; color: var(--fg-1, #e6e9ef); }
+.mv-sketch-head span { font-size: 11px; color: var(--fg-3, #8b93a3); flex: 1 1 auto; }
+.mv-sketch-head button {
+  height: 26px;
+  padding: 0 12px;
+  font: 600 11px/1 inherit;
+  color: #fff;
+  background: var(--accent, #4a9eff);
+  border: 1px solid var(--accent, #4a9eff);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+/* The offer to read a picture's depth with the model. Stated before anything is downloaded. */
+.ms-offer {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: min(380px, calc(100vw - 36px));
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--bg-1, #14181f);
+  border: 1px solid var(--line, #262c38);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.ms-offer strong { font-size: 13px; color: var(--fg-1, #e6e9ef); }
+.ms-offer p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--fg-2, #b6bdcb); }
+.ms-offer-progress { color: var(--accent, #4a9eff) !important; font-variant-numeric: tabular-nums; }
+.ms-offer-buttons { display: flex; gap: 8px; margin-top: 4px; }
+.ms-offer-buttons button {
+  height: 28px;
+  padding: 0 14px;
+  font: 600 12px/1 inherit;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--fg-2, #b6bdcb);
+  background: transparent;
+  border: 1px solid var(--line, #262c38);
+}
+.ms-offer-buttons button:first-child {
+  color: #fff;
+  background: var(--accent, #4a9eff);
+  border-color: var(--accent, #4a9eff);
+}
+.ms-offer-buttons button:disabled { opacity: 0.5; cursor: default; }

@@ -16,6 +16,7 @@
  */
 
 import { IDENTITY_PLACEMENT, type AssemblyPlan, type ComponentSpec } from './plan';
+import { headNoun } from '../generate/parse';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -869,14 +870,34 @@ export function namesSpecificProduct(text: string, recipe: Recipe): boolean {
 export function matchRecipe(text: string): Recipe | null {
   const lower = ` ${text.toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
 
+  /*
+   * The head-noun gate, for the same reason the part parser has one.
+   *
+   * "A rocket nozzle" mentions a rocket, and matching on the mention alone answers a request
+   * for one component with a whole five-part launch vehicle. "A bicycle crank" did the same
+   * with an eleven-part bicycle. Both are worse than a refusal: the user asked for a part and
+   * got an assembly, announced as a success.
+   *
+   * A recipe is only allowed to answer when it names the thing the sentence is about.
+   */
+  const knows = (word: string) =>
+    RECIPES.some((r) => r.aliases.some((alias) => headOf(alias) === word || `${headOf(alias)}s` === word));
+  const head = headNoun(text, knows);
+
   let best: Recipe | null = null;
   let bestLength = 0;
 
   for (const recipe of RECIPES) {
     for (const alias of recipe.aliases) {
       if (!lower.includes(` ${alias} `)) continue;
+      if (head.length > 2 && headOf(alias) !== head && `${headOf(alias)}s` !== head) continue;
       if (alias.length > bestLength) { best = recipe; bestLength = alias.length; }
     }
   }
   return best;
+}
+
+/** The last word of an alias — the noun it actually names. */
+function headOf(alias: string): string {
+  return alias.trim().split(/\s+/).pop() ?? alias;
 }

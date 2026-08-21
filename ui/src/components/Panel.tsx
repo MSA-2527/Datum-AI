@@ -8,6 +8,7 @@ import { Composer } from './Composer';
 import { ContextBar } from './ContextBar';
 import { PlanCard } from './PlanCard';
 import { HealthTab, ParamsTab, TreeTab } from './Tabs';
+import { ModelTree, FeatureEditor } from './ModelTree';
 
 const TABS: { id: Tab; label: string; glyph: string }[] = [
   { id: 'chat', label: 'Chat', glyph: '💬' },
@@ -33,6 +34,20 @@ export function Panel() {
   const setTab = useStore((s) => s.setTab);
   const ctx = useStore((s) => s.context);
   const note = useStore((s) => s.note);
+
+  /*
+   * Which document the tree and the parameters describe.
+   *
+   * With a seat attached this panel is a view onto the live SOLIDWORKS document, and
+   * `TreeTab` and `ParamsTab` read it. With no seat there is no such document, and they were
+   * reading the 2.5D sample bracket instead - underneath a banner promising "every control
+   * works and your work is saved locally as you go", which was true of the modeller and not of
+   * anything on this screen.
+   *
+   * Standalone, the same tree and feature editor the modeller uses go here. They read the
+   * document the assistant builds into, so the promise the banner makes is one the panel keeps.
+   */
+  const standalone = useStore((s) => s.demo);
 
   const warnings = (ctx?.features ?? []).filter((f) => f.underDefined || f.fragileRef).length;
 
@@ -63,8 +78,10 @@ export function Panel() {
 
       <div id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`} className="panel-body">
         {tab === 'chat' && <Stream />}
-        {tab === 'tree' && <TreeTab />}
-        {tab === 'params' && <ParamsTab />}
+        {tab === 'tree' && (standalone ? <ModelTree /> : <TreeTab />)}
+        {tab === 'params' && (
+          standalone ? <div className="tabc"><FeatureEditor /></div> : <ParamsTab />
+        )}
         {tab === 'health' && <HealthTab />}
       </div>
 
@@ -117,7 +134,10 @@ function Header({ onOpenStudio }: { onOpenStudio: () => void }) {
   const setProvider = useStore((s) => s.setProvider);
   const connected = useStore((s) => s.connected);
 
-  const active = providers.find((p) => p.id === providerId);
+  // Only an *available* provider is the active one. The chip is the one place that tells a
+  // user where their geometry is going, so naming a planner that is not attached is the worst
+  // thing it can do — worse than saying nothing.
+  const active = providers.find((p) => p.id === providerId && p.available);
 
   /**
    * The provider chip is the most important status in the app: it tells the user

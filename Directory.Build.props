@@ -9,7 +9,12 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <NeutralLanguage>en</NeutralLanguage>
     <Company>DATUM</Company>
-    <Product>DATUM for SOLIDWORKS</Product>
+    <!--
+      The product is DATUM. SOLIDWORKS is one optional connector to it, and stamping every
+      assembly - including the ones that never touch a CAD seat - with "DATUM for SOLIDWORKS"
+      described the product as an add-in to something it does not depend on.
+    -->
+    <Product>DATUM</Product>
     <Version>0.1.0</Version>
     <Deterministic>true</Deterministic>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>

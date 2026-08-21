@@ -90,6 +90,7 @@ uniform bool uHasPicked;
 uniform sampler2D uFaceColour;
 uniform float uFaceColourWidth;
 uniform bool uHasFaceColour;
+uniform bool uUnlit;
 
 out vec4 outColour;
 
@@ -146,6 +147,19 @@ void main() {
   if (picked) colour = uPickedColour;
   else if (inSelectedFeature) colour = uSelectedColour;
   else if (abs(vFaceId - uHoverFace) < 0.5) colour = uHoverColour;
+
+  /*
+   * Unlit, for hidden-line.
+   *
+   * There the solid is drawn in the page colour purely to write depth, and shading it leaves a
+   * faint ghost of the part behind the lines — light enough to look like a rendering artefact
+   * and dark enough to see. A drawing has no shading in it at all, so this returns the colour
+   * flat and the depth buffer gets what it came for.
+   */
+  if (uUnlit) {
+    outColour = vec4(colour, 1.0);
+    return;
+  }
 
   vec3 lit = colour * (ambient + key * 0.72 + fill) + vec3(rim);
   outColour = vec4(lit, 1.0);
@@ -209,6 +223,8 @@ void main() {
 
 // ── renderer ─────────────────────────────────────────────────────────────────
 
+export type DisplayMode = 'shaded' | 'shadedEdges' | 'wireframe' | 'hiddenLine';
+
 export interface RenderOptions {
   view: Mat4;
   projection: Mat4;
@@ -219,6 +235,24 @@ export interface RenderOptions {
   /** Inclusive face-tag range belonging to the selected feature, or [-1, -1]. */
   selectedFeatureRange: [number, number];
   showEdges: boolean;
+  /**
+   * How the solid is drawn.
+   *
+   * The four modes every mechanical CAD package offers, and each earns its place:
+   *
+   *   shaded       the form, with nothing in the way of reading it
+   *   shadedEdges  the form plus its edges, which is what most work is done in
+   *   wireframe    every edge including the ones behind, for seeing internal structure
+   *   hiddenLine   edges only, with the near ones occluding the far — a drawing, on screen
+   *
+   * `hiddenLine` is the one worth explaining: the solid is drawn in the background colour so
+   * it writes depth without being seen, and the edges are drawn against it. What comes out is
+   * the same picture the drafting sheet produces, in the viewport, live — which is how you
+   * check a drawing before you make one.
+   */
+  displayMode: DisplayMode;
+  /** World-space line pairs for the ground grid, drawn under everything. */
+  grid?: { minor: Float32Array; major: Float32Array; axes: Float32Array } | null;
   dark: boolean;
   /**
    * Cut the model open along a plane, hiding everything in front of it.
@@ -249,6 +283,8 @@ export class SolidRenderer {
   private normalBuffer: WebGLBuffer | null = null;
   private faceIdBuffer: WebGLBuffer | null = null;
   private edgeBuffer: WebGLBuffer | null = null;
+  private overlayBuffer: WebGLBuffer | null = null;
+  private overlayVao: WebGLVertexArrayObject | null = null;
 
   private pickFbo: WebGLFramebuffer | null = null;
   private pickTexture: WebGLTexture | null = null;
@@ -440,50 +476,138 @@ export class SolidRenderer {
     gl.clearColor(bg[0], bg[1], bg[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
+    // ── the ground grid, under everything ──
+    if (opts.grid) {
+      this.drawLines(opts.grid.minor, opts.dark ? [0.15, 0.17, 0.21] : [0.85, 0.86, 0.89], 0.9, opts);
+      this.drawLines(opts.grid.major, opts.dark ? [0.24, 0.27, 0.33] : [0.73, 0.75, 0.79], 0.9, opts);
+      this.drawLines(opts.grid.axes, opts.dark ? [0.42, 0.47, 0.56] : [0.55, 0.58, 0.64], 1, opts);
+    }
+
     if (this.counts.triangleCount === 0) return;
 
+    const mode = opts.displayMode;
+    // Captured because the calls above cost the narrowing from the guard at the top.
+    const solidProgram = this.solidProgram!;
+    const wantsSolid = mode !== 'wireframe';
+    const wantsEdges = mode !== 'shaded' && this.counts.edgeCount > 0 && this.edgeProgram;
+
     // ── solid ──
-    gl.useProgram(this.solidProgram);
-    this.setMat4(this.solidProgram, 'uView', opts.view);
-    this.setMat4(this.solidProgram, 'uProjection', opts.projection);
+    if (wantsSolid) {
+    gl.useProgram(solidProgram);
+    this.setMat4(solidProgram, 'uView', opts.view);
+    this.setMat4(solidProgram, 'uProjection', opts.projection);
 
     const base = opts.dark ? [0.62, 0.66, 0.72] : [0.70, 0.73, 0.78];
-    this.setVec3(this.solidProgram, 'uBaseColour', base);
-    this.setVec3(this.solidProgram, 'uSelectedColour', [0.29, 0.62, 1.0]);
-    this.setVec3(this.solidProgram, 'uHoverColour', [0.45, 0.74, 1.0]);
+    this.setVec3(solidProgram, 'uBaseColour', base);
+    this.setVec3(solidProgram, 'uSelectedColour', [0.29, 0.62, 1.0]);
+    this.setVec3(solidProgram, 'uHoverColour', [0.45, 0.74, 1.0]);
     // Amber for a deliberate pick, so it reads as different from the blue of "this is the
     // feature you are editing" rather than as a shade of the same thing.
-    this.setVec3(this.solidProgram, 'uPickedColour', [1.0, 0.68, 0.24]);
-    this.setFloat(this.solidProgram, 'uHoverFace', opts.hoverFace);
+    this.setVec3(solidProgram, 'uPickedColour', [1.0, 0.68, 0.24]);
+    this.setFloat(solidProgram, 'uHoverFace', opts.hoverFace);
     this.uploadPicked(opts.pickedFaces);
     const section = opts.section ?? null;
-    this.setBool(this.solidProgram, 'uSectionOn', section !== null);
-    this.setVec3(this.solidProgram, 'uSectionNormal', section ? section.normal : [0, 0, 1]);
-    this.setFloat(this.solidProgram, 'uSectionOffset', section ? section.offset : 0);
+    this.setBool(solidProgram, 'uSectionOn', section !== null);
+    this.setVec3(solidProgram, 'uSectionNormal', section ? section.normal : [0, 0, 1]);
+    this.setFloat(solidProgram, 'uSectionOffset', section ? section.offset : 0);
 
-    this.setFloat(this.solidProgram, 'uSelectedFeatureLo', opts.selectedFeatureRange[0]);
-    this.setFloat(this.solidProgram, 'uSelectedFeatureHi', opts.selectedFeatureRange[1]);
+    this.setFloat(solidProgram, 'uSelectedFeatureLo', opts.selectedFeatureRange[0]);
+    this.setFloat(solidProgram, 'uSelectedFeatureHi', opts.selectedFeatureRange[1]);
+
+    /*
+     * Hidden-line: the solid writes depth and no colour.
+     *
+     * Drawing it in the background colour rather than turning off the colour mask, because a
+     * masked draw still has to be the *nearest* thing for the depth test to keep it, and a
+     * flat fill in the page colour gets both — the far edges are hidden by something the eye
+     * cannot see, which is exactly what a hidden-line drawing is.
+     */
+    this.setBool(solidProgram, 'uUnlit', mode === 'hiddenLine');
+    if (mode === 'hiddenLine') {
+      const solid = solidProgram;
+      const page = opts.dark ? [0.055, 0.067, 0.09] : [0.93, 0.94, 0.96];
+      this.setVec3(solid, 'uBaseColour', page);
+      this.setVec3(solid, 'uSelectedColour', page);
+      this.setVec3(solid, 'uHoverColour', page);
+      this.setVec3(solid, 'uPickedColour', page);
+    }
 
     gl.bindVertexArray(this.solidVao);
-    gl.drawArrays(gl.TRIANGLES, 0, this.counts.triangleCount * 3);
+      gl.drawArrays(gl.TRIANGLES, 0, this.counts.triangleCount * 3);
+    }
 
     // ── edges ──
-    if (opts.showEdges && this.counts.edgeCount > 0 && this.edgeProgram) {
-      gl.useProgram(this.edgeProgram);
-      this.setMat4(this.edgeProgram, 'uView', opts.view);
-      this.setMat4(this.edgeProgram, 'uProjection', opts.projection);
-      this.setVec3(this.edgeProgram, 'uColour', opts.dark ? [0.08, 0.09, 0.12] : [0.15, 0.17, 0.2]);
-      this.setFloat(this.edgeProgram, 'uAlpha', 0.85);
+    if (wantsEdges && this.edgeProgram) {
+      const edgeProgram = this.edgeProgram;
+      gl.useProgram(edgeProgram);
+      this.setMat4(edgeProgram, 'uView', opts.view);
+      this.setMat4(edgeProgram, 'uProjection', opts.projection);
+      /*
+       * An edge has to contrast with what it is drawn on, and in hidden-line that is not the
+       * solid — it is the page.
+       *
+       * Everywhere else an edge sits on the shaded body, which is light, so it is drawn dark.
+       * In the two line modes there is no lit body under it — hidden-line paints the solid the
+       * background colour and wireframe draws no solid at all — so a dark edge on a dark theme
+       * is a dark line on a dark ground: present in the buffer, invisible on the screen. The
+       * two modes that draw nothing but lines cannot be the ones where the lines cannot be
+       * seen. Measured rather than judged: on the dark theme, wireframe put zero pixels above
+       * half brightness on the screen.
+       */
+      const lineOnPage = (mode === 'hiddenLine' || mode === 'wireframe') && opts.dark;
+      this.setVec3(edgeProgram, 'uColour',
+        lineOnPage ? [0.78, 0.82, 0.88] : opts.dark ? [0.08, 0.09, 0.12] : [0.15, 0.17, 0.2]);
+      this.setFloat(edgeProgram, 'uAlpha', lineOnPage ? 1 : 0.85);
       // Scaled to the model so the same bias works on a 5 mm part and a 5 m one.
-      this.setFloat(this.edgeProgram, 'uDepthBias', this.modelScale * 0.002 + 0.01);
+      this.setFloat(edgeProgram, 'uDepthBias', this.modelScale * 0.002 + 0.01);
 
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      // Wireframe shows the edges on the far side too, which is the point of asking for it.
+      if (mode === 'wireframe') gl.disable(gl.DEPTH_TEST);
       gl.bindVertexArray(this.edgeVao);
       gl.drawArrays(gl.LINES, 0, this.counts.edgeCount * 2);
+      if (mode === 'wireframe') gl.enable(gl.DEPTH_TEST);
       gl.disable(gl.BLEND);
     }
 
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * Draws a set of world-space line segments.
+   *
+   * One shared buffer, reuploaded per call. A grid is a few hundred lines and is rebuilt
+   * whenever the camera moves anyway, so keeping a cache of it would be bookkeeping in
+   * exchange for nothing.
+   */
+  private drawLines(
+    positions: Float32Array, colour: number[], alpha: number, opts: RenderOptions,
+  ): void {
+    const gl = this.gl;
+    if (!this.edgeProgram || positions.length === 0) return;
+
+    this.overlayBuffer = this.upload(this.overlayBuffer, positions);
+    if (!this.overlayVao) {
+      this.overlayVao = gl.createVertexArray();
+    }
+    gl.bindVertexArray(this.overlayVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.overlayBuffer);
+    const loc = gl.getAttribLocation(this.edgeProgram, 'aPosition');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+
+    gl.useProgram(this.edgeProgram);
+    this.setMat4(this.edgeProgram, 'uView', opts.view);
+    this.setMat4(this.edgeProgram, 'uProjection', opts.projection);
+    this.setVec3(this.edgeProgram, 'uColour', colour);
+    this.setFloat(this.edgeProgram, 'uAlpha', alpha);
+    this.setFloat(this.edgeProgram, 'uDepthBias', 0);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.drawArrays(gl.LINES, 0, positions.length / 3);
+    gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
   }
 

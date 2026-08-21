@@ -1,7 +1,8 @@
 import { brand } from '../brand';
 import { evaluate, massGrams, type PartDoc } from './partModel';
 import { listSaved } from './persistence';
-import { loadRecipes } from './recipes';
+import { listLibrary } from './library';
+import { loadRecipes } from './docRecipes';
 import type { ModelContext, Provider } from '../types';
 
 /**
@@ -17,9 +18,28 @@ import type { ModelContext, Provider } from '../types';
  * A support bundle nobody dares send is worth nothing.
  */
 
+/**
+ * What the open DATUM document reports about itself.
+ *
+ * Passed in as plain numbers so this module stays free of the model layer. It exists because
+ * the Document section read the *SOLIDWORKS* context, which standalone is the sample bracket
+ * invented at boot: a support bundle taken while a one-feature cup was on screen reported
+ * nine features and three warnings belonging to a part that was never opened.
+ */
+export interface OpenDocumentSummary {
+  features: number;
+  rebuildErrors: number;
+  rebuildWarnings: number;
+  rebuildMs: number;
+  massGrams: number;
+  triangles: number;
+}
+
 export interface DiagnosticsInput {
   context: ModelContext | null;
   doc: PartDoc | null;
+  /** The open DATUM document, when running standalone. Preferred over `context`. */
+  open?: OpenDocumentSummary | null;
   providers: Provider[];
   providerId: string;
   connected: boolean;
@@ -35,10 +55,18 @@ export interface DiagnosticSection {
 }
 
 export function collect(input: DiagnosticsInput): DiagnosticSection[] {
-  const { context, doc, providers, providerId, connected, demo } = input;
+  const { context, doc, open, providers, providerId, connected, demo } = input;
   const geom = doc ? evaluate(doc) : null;
 
-  const active = providers.find((p) => p.id === providerId);
+  /*
+   * Only an *available* provider is the active one.
+   *
+   * The catalogue lists every planner the product can speak to, and a fresh install has none
+   * of them configured. Reporting the first entry as "Active" put "Local · qwen 14b" into a
+   * support bundle for a machine with no model attached at all, which is exactly the fact the
+   * bundle exists to establish.
+   */
+  const active = providers.find((p) => p.id === providerId && p.available);
 
   return [
     {
@@ -47,7 +75,9 @@ export function collect(input: DiagnosticsInput): DiagnosticSection[] {
         { label: 'Product', value: `${brand.fullName}` },
         { label: 'UI bundle', value: import.meta.env.MODE },
         { label: 'Operation IR', value: '1.4' },
-        { label: 'SOLIDWORKS', value: context?.swVersion ? String(context.swVersion) : 'not connected' },
+        // Gated on the connection, not on the context: standalone still carries a context
+        // object, and reading a version out of it reported a seat that is not there.
+        { label: 'SOLIDWORKS', value: connected && context?.swVersion ? String(context.swVersion) : 'not connected' },
       ],
     },
     {
@@ -59,8 +89,9 @@ export function collect(input: DiagnosticsInput): DiagnosticSection[] {
           tone: connected ? 'ok' : demo ? 'warn' : 'bad',
         },
         { label: 'Surface', value: new URLSearchParams(location.search).get('surface') ?? 'panel' },
-        { label: 'Document', value: context?.docTitle ? 'open' : 'none' },
-        { label: 'Writable', value: context?.writable ? 'yes' : 'no', tone: context?.writable ? 'ok' : 'warn' },
+        { label: 'Document', value: connected ? (context?.docTitle ? 'open' : 'none') : 'standalone' },
+        { label: 'Writable', value: connected ? (context?.writable ? 'yes' : 'no') : 'yes',
+          tone: connected && !context?.writable ? 'warn' : 'ok' },
       ],
     },
     {
@@ -74,16 +105,27 @@ export function collect(input: DiagnosticsInput): DiagnosticSection[] {
     },
     {
       title: 'Document',
-      rows: [
-        { label: 'Features', value: String(context?.features.length ?? 0) },
-        { label: 'Rebuild errors', value: String(context?.rebuildErrors ?? 0),
-          tone: (context?.rebuildErrors ?? 0) === 0 ? 'ok' : 'bad' },
-        { label: 'Warnings', value: String(context?.rebuildWarnings ?? 0),
-          tone: (context?.rebuildWarnings ?? 0) === 0 ? 'ok' : 'warn' },
-        { label: 'Rebuild time', value: `${((context?.lastRebuildMs ?? 0) / 1000).toFixed(2)} s` },
-        { label: 'Cuts evaluated', value: String(geom?.cuts.length ?? 0) },
-        { label: 'Mass', value: doc && geom ? `${massGrams(doc, geom).toFixed(1)} g` : '—' },
-      ],
+      rows: open
+        ? [
+            { label: 'Features', value: String(open.features) },
+            { label: 'Rebuild errors', value: String(open.rebuildErrors),
+              tone: open.rebuildErrors === 0 ? 'ok' as const : 'bad' as const },
+            { label: 'Warnings', value: String(open.rebuildWarnings),
+              tone: open.rebuildWarnings === 0 ? 'ok' as const : 'warn' as const },
+            { label: 'Rebuild time', value: `${(open.rebuildMs / 1000).toFixed(2)} s` },
+            { label: 'Triangles', value: String(open.triangles) },
+            { label: 'Mass', value: open.triangles > 0 ? `${open.massGrams.toFixed(1)} g` : '—' },
+          ]
+        : [
+            { label: 'Features', value: String(context?.features.length ?? 0) },
+            { label: 'Rebuild errors', value: String(context?.rebuildErrors ?? 0),
+              tone: (context?.rebuildErrors ?? 0) === 0 ? 'ok' as const : 'bad' as const },
+            { label: 'Warnings', value: String(context?.rebuildWarnings ?? 0),
+              tone: (context?.rebuildWarnings ?? 0) === 0 ? 'ok' as const : 'warn' as const },
+            { label: 'Rebuild time', value: `${((context?.lastRebuildMs ?? 0) / 1000).toFixed(2)} s` },
+            { label: 'Cuts evaluated', value: String(geom?.cuts.length ?? 0) },
+            { label: 'Mass', value: doc && geom ? `${massGrams(doc, geom).toFixed(1)} g` : '—' },
+          ],
     },
     {
       title: 'Session',
@@ -91,7 +133,9 @@ export function collect(input: DiagnosticsInput): DiagnosticSection[] {
         { label: 'Undo depth', value: String(input.undoDepth) },
         { label: 'Redo depth', value: String(input.redoDepth) },
         { label: 'Transcript items', value: String(input.streamLength) },
-        { label: 'Saved documents', value: String(listSaved().length) },
+        // The part library standalone, the legacy store when a seat is attached. Counting the
+        // legacy one either way reported zero saved documents on a machine with a full library.
+        { label: 'Saved documents', value: String(connected ? listSaved().length : listLibrary().length) },
         { label: 'User recipes', value: String(loadRecipes().length) },
       ],
     },

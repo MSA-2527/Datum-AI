@@ -3,6 +3,9 @@ import { critique } from '../ai/critique';
 import { evaluateDocument } from '../model/document';
 import { bounds, triCount } from '../kernel/topo/mesh';
 import { type EvalCase } from './cases';
+import { drawingToSvg, makeDrawing } from '../engine';
+import { projectPart } from '../lib/projectPart';
+import { analyseDfm } from '../lib/dfm';
 
 /**
  * The scoring runner.
@@ -137,6 +140,51 @@ export async function runCase(testCase: EvalCase): Promise<CaseResult> {
     checks.push(mass >= lo && mass <= hi
       ? ok('mass', `${mass.toFixed(0)} g, within ${lo}–${hi} g`)
       : bad('mass', `${mass.toFixed(0)} g, outside ${lo}–${hi} g`));
+  }
+
+  if (expect.volumeMm3) {
+    const [lo, hi] = expect.volumeMm3;
+    const volume = evaluated.volume;
+
+    checks.push(volume >= lo && volume <= hi
+      ? ok('volume', `${(volume / 1000).toFixed(2)} cm³, within ${(lo / 1000).toFixed(2)}–${(hi / 1000).toFixed(2)} cm³`)
+      : bad('volume', `${(volume / 1000).toFixed(2)} cm³, expected ${(lo / 1000).toFixed(2)}–${(hi / 1000).toFixed(2)} cm³`));
+  }
+
+  if (expect.featureKinds) {
+    const present = new Set(result.doc.features.filter((f) => !f.suppressed).map((f) => f.kind));
+    const missing = expect.featureKinds.filter((k) => !present.has(k as never));
+
+    checks.push(missing.length === 0
+      ? ok('features', `tree contains ${expect.featureKinds.join(', ')}`)
+      : bad('features', `tree is missing ${missing.join(', ')} — it has ${[...present].join(', ')}`));
+  }
+
+  if (expect.drawingHas) {
+    const drawing = makeDrawing(evaluated.mesh, {
+      density: result.doc.density,
+      titleBlock: {
+        partNumber: result.doc.name.toUpperCase(),
+        description: result.doc.name,
+        material: result.doc.material,
+      },
+    });
+    const svg = drawingToSvg(drawing);
+    const missing = expect.drawingHas.filter((needle) => !svg.includes(needle));
+
+    checks.push(missing.length === 0
+      ? ok('drawing', `drawing states ${expect.drawingHas.join(', ')}`)
+      : bad('drawing', `drawing does not state ${missing.join(', ')}`));
+  }
+
+  if (expect.blockerRule) {
+    const { doc: part, geometry } = projectPart(result.doc, evaluated);
+    const fired = analyseDfm(part, geometry).filter((f) => f.severity === 'blocker');
+
+    checks.push(fired.some((f) => f.rule === expect.blockerRule)
+      ? ok('manufacturability', `${expect.blockerRule} fired, as it must`)
+      : bad('manufacturability',
+          `${expect.blockerRule} did not fire; blockers were ${fired.map((f) => f.rule).join(', ') || 'none'}`));
   }
 
   // ── the inspection the product runs on itself ──

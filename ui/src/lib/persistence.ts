@@ -37,6 +37,24 @@ function safeParse<T>(raw: string | null): T | null {
   }
 }
 
+/**
+ * Reading can throw too, and for the same reasons writing can.
+ *
+ * `setItem` was guarded and `getItem` was not, which reads as an oversight and behaves like
+ * one: in a context where storage is denied outright — a third-party iframe, a locked profile,
+ * private browsing on some hosts — the *first touch* throws, not the write. This module is what
+ * the SOLIDWORKS task pane restores through, which is an iframe: the one place the denial is
+ * likely is the place this code runs. A throw there takes out the restore and the application
+ * comes up blank, having lost nothing, with no way to say so.
+ */
+function safeRead(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 /** Storage can throw: private browsing, quota, or a locked profile. Never fatal. */
 function safeWrite(key: string, value: string): boolean {
   try {
@@ -62,7 +80,7 @@ export interface RestoreResult {
 }
 
 export function restoreAutosave(): RestoreResult {
-  const env = safeParse<Envelope>(localStorage.getItem(AUTOSAVE_KEY));
+  const env = safeParse<Envelope>(safeRead(AUTOSAVE_KEY));
   if (!env) return { doc: null };
 
   if (typeof env.schema !== 'number' || !env.doc || !Array.isArray(env.doc.features)) {
@@ -122,7 +140,7 @@ function migrate(doc: PartDoc, from: number): PartDoc {
 type Library = Record<string, Envelope>;
 
 function readLibrary(): Library {
-  return safeParse<Library>(localStorage.getItem(LIBRARY_KEY)) ?? {};
+  return safeParse<Library>(safeRead(LIBRARY_KEY)) ?? {};
 }
 
 export function saveAs(name: string, doc: PartDoc): boolean {

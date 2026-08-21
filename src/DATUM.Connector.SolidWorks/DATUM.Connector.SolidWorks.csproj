@@ -1,0 +1,86 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    .NET Framework 4.8, deliberately.
+
+    In-process .NET 8 COM add-ins are technically possible but fragile inside
+    SLDWORKS.exe: hostfxr initialisation order, runtime-loading conflicts with the
+    other .NET Framework add-ins already in the process, and a much larger blast
+    radius when anything goes wrong. This assembly is loaded into the customer's CAD
+    session, so it stays boring: interop, a ring buffer, and a pipe client.
+    Everything interesting (models, indexing, batching) lives in the orchestrator.
+
+    Set SolidWorksDir if SOLIDWORKS is not at the default location:
+      dotnet build -p:SolidWorksDir="D:\SW\SOLIDWORKS"
+  -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <RootNamespace>Datum.Connector.SolidWorks</RootNamespace>
+    <AssemblyName>DATUM.Connector.SolidWorks</AssemblyName>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableComHosting>false</EnableComHosting>
+    <RegisterForComInterop>false</RegisterForComInterop>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <ComVisible>false</ComVisible>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(SolidWorksDir)' == ''">
+    <SolidWorksDir>$(ProgramFiles)\SOLIDWORKS Corp\SOLIDWORKS</SolidWorksDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DATUM.Contracts\DATUM.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Threading.Channels" Version="8.0.0" />
+
+    <!--
+      Supplies the .NET Framework 4.8 targeting pack, so this add-in builds with nothing
+      but the .NET SDK. Without it, net48 needs Visual Studio or the standalone developer
+      pack installed — an avoidable barrier on a build agent or a fresh workstation.
+    -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    SOLIDWORKS interop assemblies ship with the product; they are not redistributable,
+    so they are referenced from the local installation rather than vendored.
+  -->
+  <ItemGroup>
+    <Reference Include="SolidWorks.Interop.sldworks">
+      <HintPath>$(SolidWorksDir)\api\redist\SolidWorks.Interop.sldworks.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swconst">
+      <HintPath>$(SolidWorksDir)\api\redist\SolidWorks.Interop.swconst.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swpublished">
+      <HintPath>$(SolidWorksDir)\api\redist\SolidWorks.Interop.swpublished.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swcommands">
+      <HintPath>$(SolidWorksDir)\api\redist\SolidWorks.Interop.swcommands.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="CheckSolidWorksRefs" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(SolidWorksDir)\api\redist\SolidWorks.Interop.sldworks.dll')"
+           Text="SOLIDWORKS interop assemblies not found under '$(SolidWorksDir)\api\redist'. Install SOLIDWORKS or pass -p:SolidWorksDir=&lt;path&gt;." />
+  </Target>
+
+</Project>

@@ -42,6 +42,14 @@ export interface ProviderInfo {
   needsKey: boolean;
   keyUrl?: string;
   supportsWebSearch: boolean;
+  /**
+   * Whether this provider can be sent an image.
+   *
+   * A property of the *endpoint*, not of the model: every adapter below either has a wire
+   * format for image content or it does not. Whether the particular model behind it can see
+   * is the user's business, and the provider says so plainly when it cannot.
+   */
+  supportsImages: boolean;
   note: string;
 }
 
@@ -52,6 +60,7 @@ export const PROVIDERS: ProviderInfo[] = [
     suggestedModels: [],
     needsKey: false,
     supportsWebSearch: false,
+    supportsImages: false,
     note:
       'Offline, instant and repeatable. Handles the shape catalogue and dimensions in plain ' +
       'language. Cannot decompose an unfamiliar object into parts.',
@@ -63,6 +72,7 @@ export const PROVIDERS: ProviderInfo[] = [
     needsKey: true,
     keyUrl: 'https://aistudio.google.com/apikey',
     supportsWebSearch: true,
+    supportsImages: true,
     note:
       'The model id is free text, so any name Google publishes can be used. Supports Google ' +
       'Search grounding, which is the only practical way to look something up from a browser.',
@@ -74,6 +84,7 @@ export const PROVIDERS: ProviderInfo[] = [
     needsKey: true,
     keyUrl: 'https://console.anthropic.com/settings/keys',
     supportsWebSearch: false,
+    supportsImages: true,
     note: 'Requires the browser-access header, which Anthropic gates per key.',
   },
   {
@@ -83,6 +94,7 @@ export const PROVIDERS: ProviderInfo[] = [
     needsKey: true,
     keyUrl: 'https://platform.openai.com/api-keys',
     supportsWebSearch: false,
+    supportsImages: true,
     note: 'Also works with any endpoint that speaks the same chat-completions shape.',
   },
   {
@@ -104,6 +116,7 @@ export const PROVIDERS: ProviderInfo[] = [
     needsKey: true,
     keyUrl: 'https://console.groq.com/keys',
     supportsWebSearch: false,
+    supportsImages: true,
     note:
       'Runs open models on their own inference hardware, which makes it the fastest of the ' +
       'hosted options by a wide margin — useful when a plan is being generated, inspected and ' +
@@ -118,6 +131,7 @@ export const PROVIDERS: ProviderInfo[] = [
     suggestedModels: ['qwen2.5-coder:14b', 'llama3.1:8b'],
     needsKey: false,
     supportsWebSearch: false,
+    supportsImages: true,
     note:
       'Runs on this machine, so nothing leaves it. Start Ollama with ' +
       'OLLAMA_ORIGINS set to allow this page, or the browser will refuse the request.',
@@ -163,9 +177,39 @@ export function clearKey(): void {
 
 // ── requests ─────────────────────────────────────────────────────────────────
 
+/**
+ * An image attached to a request.
+ *
+ * Base64 rather than a URL, because there is no server here to host one from and a model's
+ * fetcher cannot reach `blob:` or `data:` in a page's own memory. The bytes travel with the
+ * request or they do not travel at all.
+ */
+export interface RequestImage {
+  /** As the provider needs it stated: `image/png`, `image/jpeg`, `image/webp`. */
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp';
+  /** The raw base64 payload, with no `data:` prefix — every adapter adds its own framing. */
+  base64: string;
+  /** What it shows, so a multi-view request can say which view this is. */
+  label?: string;
+}
+
 export interface CompletionRequest {
   system: string;
   user: string;
+  /**
+   * Images the model should look at.
+   *
+   * This interface was text-only, and that was not a gap in a feature — it was a wall in front
+   * of a product category. A photograph could reach the classical tracer in `ingest/image/`
+   * and nothing else; there was no path by which a model could *see* a part, so multi-view
+   * reconstruction, drawing-sheet reading and visual review of what was just built were all
+   * unreachable no matter what was built on top.
+   *
+   * Sending images to a provider that cannot read them is refused rather than silently
+   * dropped: a model answering a question about a picture it never received produces a
+   * confident description of nothing, which is the worst failure this application has.
+   */
+  images?: RequestImage[];
   /** Hard ceiling on the reply, so a runaway response cannot hang the UI. */
   maxTokens?: number;
   signal?: AbortSignal;
@@ -193,6 +237,16 @@ export interface CompletionFailure {
 export type Completion = CompletionResult | CompletionFailure;
 
 const TIMEOUT_MS = 45_000;
+
+/**
+ * The largest image any of these APIs will take, as base64 characters.
+ *
+ * Five megabytes of *encoded* payload, which is about 3.7 MB of image — the lowest common
+ * ceiling across Anthropic, OpenAI and Gemini. Checked here rather than left to the provider
+ * because a 413 from an image upload reads as a rate limit, and the retry logic below would
+ * dutifully shrink the *token budget* in response to a problem no token budget can fix.
+ */
+const MAX_IMAGE_BASE64 = 5_000_000;
 
 /**
  * Sends one completion request.
@@ -223,6 +277,39 @@ export async function complete(config: ProviderConfig, req: CompletionRequest): 
     return {
       ok: false,
       message: `No model id set for ${info.label}. Try ${info.suggestedModels[0] ?? 'the provider’s current model'}.`,
+      retryable: false,
+    };
+  }
+
+  /*
+   * Images to a provider that cannot read them: refused, not dropped.
+   *
+   * Quietly stripping the attachments and sending the question anyway is the worst available
+   * behaviour. The model answers a question about a picture it never received, fluently and in
+   * the right format, and the reply is indistinguishable from one grounded in the image — so
+   * the failure surfaces as a wrong part rather than as an error.
+   */
+  if ((req.images ?? []).length > 0 && !info.supportsImages) {
+    const seeing = PROVIDERS.filter((candidate) => candidate.supportsImages).map((c) => c.label);
+    return {
+      ok: false,
+      message:
+        `${info.label} cannot be sent an image. ` +
+        `Choose one that can — ${seeing.join(', ')} — in AI settings.`,
+      retryable: false,
+    };
+  }
+
+  const oversized = (req.images ?? []).find((img) => img.base64.length > MAX_IMAGE_BASE64);
+  if (oversized) {
+    return {
+      ok: false,
+      message:
+        `${oversized.label ? `The image "${oversized.label}"` : 'An image'} is about ` +
+        `${Math.round((oversized.base64.length * 3) / 4 / 1e6)} MB, over the ${
+          Math.round((MAX_IMAGE_BASE64 * 3) / 4 / 1e6)} MB every one of these APIs rejects ` +
+        `above. Scale it down before sending — detail beyond a couple of megapixels does not ` +
+        `survive the model's own resizing anyway.`,
       retryable: false,
     };
   }
@@ -400,7 +487,29 @@ async function readError(res: Response, info: ProviderInfo): Promise<CompletionF
   }
 
   if (res.status === 429) {
-    return { ok: false, message: `${info.label} is rate limiting. Wait and try again.`, detail, retryable: true };
+    /*
+     * Two different things arrive as 429, and telling a user the wrong one wastes their day.
+     *
+     * A *burst* limit is a few requests too close together: waiting a minute clears it, and
+     * "wait and try again" is exactly right. A *quota* is the allowance for the day or the month
+     * spent — a free tier, usually — and waiting a minute does nothing whatever. Told to wait,
+     * somebody sits there retrying an account that will not answer again until tomorrow.
+     *
+     * The provider's own text distinguishes them, so it is read rather than flattened.
+     */
+    const spent = /quota|billing|exceeded your current|per day|daily limit/i.test(detail ?? '');
+
+    return {
+      ok: false,
+      message: spent
+        ? `${info.label} says this account's quota is spent, which waiting will not clear. `
+          + 'A free tier resets on its own schedule — until then, choose a different model or '
+          + 'provider, or add billing to the account.'
+        : `${info.label} is rate limiting: too many requests too close together. `
+          + 'Wait a minute and try again.',
+      detail,
+      retryable: !spent,
+    };
   }
   if (res.status >= 500) {
     return { ok: false, message: `${info.label} had a server error.`, detail, retryable: true };
@@ -417,9 +526,19 @@ async function callGemini(
   const base = config.baseUrl?.trim() || 'https://generativelanguage.googleapis.com/v1beta';
   const url = `${base}/models/${encodeURIComponent(config.model)}:generateContent`;
 
+  // Images before the text. Every one of these APIs attends better to a question asked *about*
+  // pictures already in context than to pictures appended after the question, and putting them
+  // first costs nothing.
+  const parts: Record<string, unknown>[] = [
+    ...(req.images ?? []).map((img) => ({
+      inline_data: { mime_type: img.mediaType, data: img.base64 },
+    })),
+    { text: req.user },
+  ];
+
   const body: Record<string, unknown> = {
     systemInstruction: { parts: [{ text: req.system }] },
-    contents: [{ role: 'user', parts: [{ text: req.user }] }],
+    contents: [{ role: 'user', parts }],
     generationConfig: {
       temperature: 0.2,
       maxOutputTokens: req.maxTokens ?? 4096,
@@ -506,7 +625,16 @@ async function callAnthropic(
       max_tokens: req.maxTokens ?? 4096,
       temperature: 0.2,
       system: req.system,
-      messages: [{ role: 'user', content: req.user }],
+      messages: [{
+        role: 'user',
+        content: [
+          ...(req.images ?? []).map((img) => ({
+            type: 'image' as const,
+            source: { type: 'base64' as const, media_type: img.mediaType, data: img.base64 },
+          })),
+          { type: 'text' as const, text: req.user },
+        ],
+      }],
     }),
     signal,
   });
@@ -597,7 +725,22 @@ async function callOpenAi(
       ...(strictJson ? { response_format: { type: 'json_object' } } : {}),
       messages: [
         { role: 'system', content: req.system },
-        { role: 'user', content: req.user },
+        {
+          role: 'user',
+          // A plain string when there is nothing to look at: the array form is accepted by
+          // OpenAI itself but rejected by several compatible endpoints that only implement
+          // the simple shape, and there is no reason to make them all handle it for a
+          // text-only request.
+          content: (req.images ?? []).length === 0
+            ? req.user
+            : [
+                ...(req.images ?? []).map((img) => ({
+                  type: 'image_url' as const,
+                  image_url: { url: `data:${img.mediaType};base64,${img.base64}` },
+                })),
+                { type: 'text' as const, text: req.user },
+              ],
+        },
       ],
     }),
     signal,
@@ -703,7 +846,15 @@ async function callOllama(
       options: { temperature: 0.2 },
       messages: [
         { role: 'system', content: req.system },
-        { role: 'user', content: req.user },
+        {
+          role: 'user',
+          content: req.user,
+          // Ollama takes bare base64 on the message rather than as content blocks, and omits
+          // the media type entirely — it sniffs the bytes.
+          ...((req.images ?? []).length > 0
+            ? { images: (req.images ?? []).map((img) => img.base64) }
+            : {}),
+        },
       ],
     }),
     signal,

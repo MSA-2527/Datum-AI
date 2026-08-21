@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useStore } from '../store';
+import { useModel } from '../modelStore';
+import { triCount } from '../engine';
 import { buildSupportBundle, collect, type DiagnosticsInput } from '../lib/diagnostics';
 import { download } from '../lib/exporters';
 import { brand } from '../brand';
@@ -23,12 +25,26 @@ export function DiagnosticsView() {
   const stream = useStore((s) => s.stream);
   const note = useStore((s) => s.note);
 
+  // The open DATUM document, which is what "the document" means with no seat attached.
+  const modelDoc = useModel((s) => s.doc);
+  const evaluated = useModel((s) => s.evaluated);
+
   const [includeIdentifiers, setIncludeIdentifiers] = useState(false);
 
   const input: DiagnosticsInput = useMemo(
     () => ({
       doc,
       context,
+      open: demo
+        ? {
+            features: modelDoc.features.length,
+            rebuildErrors: evaluated.errors.size,
+            rebuildWarnings: evaluated.warnings.size,
+            rebuildMs: evaluated.rebuildMs,
+            massGrams: evaluated.massGrams,
+            triangles: triCount(evaluated.mesh),
+          }
+        : null,
       providers,
       providerId,
       connected,
@@ -37,7 +53,8 @@ export function DiagnosticsView() {
       redoDepth: redoStack.length,
       streamLength: stream.length,
     }),
-    [doc, context, providers, providerId, connected, demo, undoStack.length, redoStack.length, stream.length],
+    [doc, context, modelDoc, evaluated, providers, providerId, connected, demo,
+     undoStack.length, redoStack.length, stream.length],
   );
 
   const sections = useMemo(() => collect(input), [input]);

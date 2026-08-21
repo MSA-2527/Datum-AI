@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, type UiRequest } from './lib/api';
-import { demoPlanFor, demoProviders, newDemoDoc } from './lib/demo';
+import { demoPlanFor, providersFor, newDemoDoc } from './lib/demo';
+import { loadConfig } from './ai/providers';
 import { proposeRepair, runSuite } from './lib/cadtests';
 import { autosave, open as openSaved, restoreAutosave, saveAs } from './lib/persistence';
 import {
@@ -105,7 +106,6 @@ interface State {
   newDocument: () => void;
   saveDocument: (name?: string) => void;
   openDocument: (name: string) => void;
-  runSkill: (skillId: string, inputs: Record<string, number>) => void;
   applyDeltas: (deltas: WireDelta[]) => void;
   focusComposer: () => void;
   handleUiRequest: (req: UiRequest) => void;
@@ -161,7 +161,7 @@ export const useStore = create<State>((set, get) => ({
         stale: false,
         doc,
         context: toContext(doc, false),
-        providers: demoProviders,
+        providers: providersFor(loadConfig()),
       });
 
       if (restored.problem) {
@@ -659,33 +659,6 @@ export const useStore = create<State>((set, get) => ({
       ),
     };
     set((s) => ({ doc: next, context: toContext(next, s.connected) }));
-  },
-
-  /**
-   * Skills are deterministic: no planner, no tokens. They compile straight to globals
-   * and operations, which is why they stay free and work offline.
-   */
-  runSkill(skillId, inputs) {
-    const doc = get().doc;
-    if (!doc) return;
-
-    let next = doc;
-    for (const [k, v] of Object.entries(inputs)) next = setGlobal(next, k, v);
-
-    set((s) => ({
-      doc: next,
-      context: toContext(next, s.connected),
-      undoStack: [...s.undoStack, { planId: skillId, doc, label: `Skill: ${skillId}` }].slice(-25),
-      stream: s.stream.concat({
-        kind: 'notice',
-        id: nextId(),
-        tone: 'info',
-        title: 'Skill applied',
-        text: `${skillId} ran deterministically — ${Object.entries(inputs)
-          .map(([k, v]) => `${k} ${v}`)
-          .join(', ')}. No model was involved and nothing left this machine.`,
-      }),
-    }));
   },
 
   focusComposer: () =>

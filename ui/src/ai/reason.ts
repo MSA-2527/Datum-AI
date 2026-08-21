@@ -31,6 +31,7 @@
 
 import {
   checkRequirements, describeChecks, readRequirements, scaleToMeet,
+  type RequirementKind,
   type Check, type Requirement,
 } from './requirements';
 import { evaluateDocument, type Document } from '../model/document';
@@ -245,6 +246,46 @@ export function consultLibrary(text: string, requirements: Requirement[]): Reaso
 }
 
 /**
+ * The chain for an *edit*: check, but never rescale.
+ *
+ * An edit already says exactly what to change and to what. Running the correction pass over one
+ * is not a safety net, it is a second opinion that overrules the instruction — and it does real
+ * damage, because the requirement reader and the edit reader legitimately understand the same
+ * words differently. "Make the bracket 5 mm thick" is a thickness parameter to the editor and an
+ * overall height to the requirement reader, and both are reasonable readings of the sentence.
+ *
+ * With the correction pass attached, that disagreement scaled a folded bracket by 5/60 and took
+ * it from 11.6 cm³ to 0.05 cm³ while reporting that everything asked for had been met. The edit
+ * was right; the correction was answering a different question.
+ *
+ * So an edit is verified and reported and never resized. Where the check disagrees, it is said
+ * plainly and the user decides, which is the only honest thing to do when two readings of one
+ * sentence conflict.
+ */
+export function reasonAboutEdit(
+  text: string, doc: Document, what: string,
+): { doc: Document; reasoning: Reasoning } {
+  const steps: ReasoningStep[] = [];
+
+  const asked = stateRequirements(text);
+  steps.push(asked.step);
+  steps.push({ name: 'Change', finding: what, acted: true });
+
+  const checked = verify(doc, asked.requirements);
+  steps.push(checked.step);
+
+  return {
+    doc,
+    reasoning: {
+      steps,
+      requirements: asked.requirements,
+      checks: checked.checks,
+      satisfied: checked.checks.every((c) => c.met),
+    },
+  };
+}
+
+/**
  * The whole chain, over a document that some earlier route already built.
  *
  * Separated from the routes that build so that every one of them — recipe, catalogue, plan,
@@ -253,11 +294,31 @@ export function consultLibrary(text: string, requirements: Requirement[]): Reaso
  */
 export function reasonAbout(
   text: string, doc: Document, approach: string,
+  options: { built?: RequirementKind[] } = {},
 ): { doc: Document; reasoning: Reasoning } {
   const steps: ReasoningStep[] = [];
 
   const asked = stateRequirements(text);
   steps.push(asked.step);
+
+  /*
+   * Dimensions the builder read and built to are not re-measured off the bounding box.
+   *
+   * The box is an approximation of intent — it has no idea which axis a part was turned
+   * about — and where the builder understood a dimension exactly, that approximation can only
+   * disagree. "A spacer 20 mm od 8 mm id 12 mm long" was built correctly at 3.17 cm³, then
+   * checked: "long" was measured as the largest extent, which on a flat washer is its 20 mm
+   * diameter, and the correction pass scaled the whole part by 0.6 to make it 12 — leaving a
+   * 12 mm washer 7 mm thick and calling the requirement met.
+   *
+   * A parameter the builder bound is the more precise statement of the two. It is dropped from
+   * the checking rather than checked leniently, because a check that cannot fail is noise.
+   */
+  const checkable = options.built && options.built.length > 0
+    ? asked.requirements.filter((r) => !options.built!.includes(r.kind))
+    : asked.requirements;
+
+  asked.requirements = checkable;
 
   const library = consultLibrary(text, asked.requirements);
   if (library) steps.push(library);

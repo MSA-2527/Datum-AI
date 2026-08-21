@@ -12,8 +12,10 @@ import {
   STEP_TEMPLATES,
   type Recipe,
   type RecipeStep,
-} from '../lib/recipes';
-import { FEATURE_TEMPLATES, type FeatureKind } from '../lib/partModel';
+} from '../lib/docRecipes';
+import { KINDS } from './ModelTree';
+import { useModel } from '../modelStore';
+import type { FeatureKind } from '../model/document';
 import { download } from '../lib/exporters';
 
 /**
@@ -28,7 +30,15 @@ import { download } from '../lib/exporters';
  * support incident waiting to happen.
  */
 export function RecipeEditor() {
-  const doc = useStore((s) => s.doc);
+  /*
+   * Run against the part on screen.
+   *
+   * The engine and this editor both spoke the 2.5D `partModel`, so a dry run reported steps
+   * applied to the sample bracket and a real run exported a drawing of it - beside a viewport
+   * showing something else entirely. Both now work on the feature tree the kernel evaluates.
+   */
+  const doc = useModel((s) => s.doc);
+  const commitDoc = useModel((s) => s.commit);
   const note = useStore((s) => s.note);
 
   const [generation, setGeneration] = useState(0);
@@ -57,13 +67,11 @@ export function RecipeEditor() {
   };
 
   const dryRun = () => {
-    if (!doc) return;
     const run = runRecipe(selected, doc, {}, { dryRun: true });
     setLastRun(run);
   };
 
   const commitRun = () => {
-    if (!doc) return;
     const run = runRecipe(selected, doc, {});
     setLastRun(run);
 
@@ -78,7 +86,9 @@ export function RecipeEditor() {
     for (const step of run.steps) {
       if (step.artifact) download(step.artifact.filename, step.artifact.contents, step.artifact.mime);
     }
-    useStore.setState({ doc: run.doc });
+    // Through `commit`, not a direct set: it is what records the undo entry and schedules
+    // the rebuild, so a recipe is as undoable as anything else the user does.
+    commitDoc(run.doc, selected.name);
     note('info', `${selected.name} completed — ${run.steps.length} steps.`, 'Recipe applied');
   };
 
@@ -342,10 +352,10 @@ function StepFields({
   );
 
   switch (step.kind) {
-    case 'setGlobal':
+    case 'setParameter':
       return (
         <>
-          {text('Variable', step.name, (v) => onChange({ ...step, name: v }))}
+          {text('Parameter', step.name, (v) => onChange({ ...step, name: v }))}
           {num('Value', typeof step.value === 'number' ? step.value : 0, (v) => onChange({ ...step, value: v }))}
         </>
       );
@@ -374,8 +384,8 @@ function StepFields({
             value={step.feature}
             onChange={(e) => onChange({ ...step, feature: e.target.value as FeatureKind })}
           >
-            {FEATURE_TEMPLATES.filter((t) => !t.needsSeed).map((t) => (
-              <option key={t.kind} value={t.kind}>{t.label}</option>
+            {KINDS.map((k) => (
+              <option key={k.kind} value={k.kind}>{k.label}</option>
             ))}
           </select>
         </div>

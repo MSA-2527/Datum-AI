@@ -6,7 +6,8 @@ import { ModelViewport } from './ModelViewport';
 import { Assistant } from './Assistant';
 import { BatchView, DrawingsView, HistoryView, IndexView, SkillsView } from './StudioViews';
 import { DfmView } from './DfmView';
-import { ModelToolbar } from './ModelTools';
+import { ScriptView } from './ScriptView';
+import { DocumentToolbar } from './DocumentToolbar';
 import { RecipeEditor } from './RecipeEditor';
 import { DiagnosticsView } from './DiagnosticsView';
 
@@ -15,6 +16,7 @@ type View =
   | 'tree'
   | 'params'
   | 'feature'
+  | 'script'
   | 'dfm'
   | 'skills'
   | 'recipes'
@@ -30,6 +32,7 @@ const RAIL: { id: View; glyph: string; label: string }[] = [
   { id: 'tree', glyph: '⌗', label: 'Model Explorer' },
   { id: 'params', glyph: '⚙', label: 'Parameters' },
   { id: 'feature', glyph: '◈', label: 'Feature editor' },
+  { id: 'script', glyph: '⌨', label: 'Script' },
   { id: 'dfm', glyph: '$', label: 'Manufacturability & cost' },
   { id: 'skills', glyph: '⚡', label: 'Skills' },
   { id: 'recipes', glyph: '⧉', label: 'Recipes' },
@@ -82,7 +85,7 @@ export function Studio() {
         Two pipelines, one of them invisible.
       */}
       <div className="st-col st-center">
-        <ModelToolbar />
+        <DocumentToolbar />
         <ModelViewport />
       </div>
 
@@ -110,6 +113,8 @@ function LeftView({ view }: { view: View }) {
           <ModelFeatureEditor />
         </div>
       );
+    case 'script':
+      return <ScriptView />;
     case 'health':
       return <HealthTab />;
     case 'dfm':

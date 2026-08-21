@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  closestNamedView, defaultCamera, fit, namedView, orbit, pan, projectionMatrix,
-  viewMatrix, zoomAt, type CameraState, type NamedView,
+  closestNamedView, defaultCamera, fit, mmPerPixel, namedView, orbit, pan, pickRay,
+  projectionMatrix, viewMatrix, zoomAt, type CameraState, type NamedView,
 } from '../viewport/camera';
-import { SolidRenderer, webglAvailable } from '../viewport/renderer';
+import { SolidRenderer, webglAvailable, type DisplayMode } from '../viewport/renderer';
+import {
+  gridFor, projectPoint, scaleBarFor, triadFor, viewCubeFaces, viewCubeHit,
+} from '../viewport/overlay';
+import { measureBetween, snap, type SnapPoint } from '../viewport/measure';
+import {
+  dragAboutAxis, dragAlongAxis, gizmoHandles, gizmoOrigin, grabHandle, type GizmoHandle,
+} from '../viewport/gizmo';
 import { bounds, getTriangle, triCount, type Mesh } from '../kernel/topo/mesh';
 import { matMul, xformPoint, type Mat4, type Vec3 } from '../kernel/math/vec';
 
@@ -81,6 +88,13 @@ export interface Viewport3DProps {
    */
   onMovePart?: (dx: number, dy: number, dz: number) => void;
   /**
+   * Turn the selected part about a model axis, in degrees.
+   *
+   * Separate from moving because a placement stores the two separately, and because a gesture
+   * that could do either depending on how it started is a gesture nobody trusts.
+   */
+  onRotatePart?: (drx: number, dry: number, drz: number) => void;
+  /**
    * True while an open feature is collecting faces.
    *
    * Clicks then pick faces and leave the editor alone. Otherwise scoping a fillet would be
@@ -137,6 +151,13 @@ function screenAxes(c: CameraState): [[number, number, number], [number, number,
 function viewHeightMm(c: CameraState): number {
   return c.fovMm;
 }
+
+const DISPLAY_MODES: { mode: DisplayMode; label: string; title: string }[] = [
+  { mode: 'shaded', label: 'SHD', title: 'Shaded (W cycles)' },
+  { mode: 'shadedEdges', label: 'S+E', title: 'Shaded with edges (W cycles)' },
+  { mode: 'hiddenLine', label: 'HLR', title: 'Hidden line — the drawing, live (W cycles)' },
+  { mode: 'wireframe', label: 'WIR', title: 'Wireframe, including edges behind (W cycles)' },
+];
 
 const VIEW_BUTTONS: { view: NamedView; label: string; title: string }[] = [
   { view: 'iso', label: 'ISO', title: 'Isometric' },
@@ -202,6 +223,38 @@ export function Viewport3D(props: Viewport3DProps) {
   const [showEdges, setShowEdges] = useState(true);
 
   /**
+   * How the solid is drawn, and whether the furniture is shown.
+   *
+   * `showEdges` stays as the thing the E key toggles, because that is the switch people reach
+   * for constantly; the mode below is the fuller choice, and the two are reconciled when the
+   * render options are assembled. Wireframe and hidden-line ignore the edge toggle, since
+   * edges are all either of them draws.
+   */
+  const [displayMode, setDisplayMode] = useState<DisplayMode>('shadedEdges');
+  const [showGrid, setShowGrid] = useState(true);
+
+  /**
+   * The measuring tape.
+   *
+   * A mode rather than a modifier, because measuring is something you do for a while: you take
+   * one dimension, then another, then a third off the same part, and a modifier key held
+   * through all that is a worse tool than a button pressed once. Two points make a
+   * measurement, and a third starts a new one — so the common case, walking around a part
+   * taking dimensions, is one click each after the first.
+   */
+  const [measuring, setMeasuring] = useState(false);
+  const [measurePoints, setMeasurePoints] = useState<SnapPoint[]>([]);
+
+  /**
+   * The move-and-turn gizmo on the selected part.
+   *
+   * On by default, and only ever visible when something is selected — which is the whole of its
+   * discoverability problem solved: a user who selects a part sees the handles appear on it and
+   * does not have to know a mode exists.
+   */
+  const [showGizmo, setShowGizmo] = useState(true);
+
+  /**
    * The section plane: which axis it cuts along, and how far through the part.
    *
    * Kept as a fraction rather than a coordinate so the slider means the same thing on a 6 mm
@@ -218,10 +271,12 @@ export function Viewport3D(props: Viewport3DProps) {
 
   const dragRef = useRef<
     {
-      mode: 'orbit' | 'pan' | 'move' | 'band' | 'push';
+      mode: 'orbit' | 'pan' | 'move' | 'band' | 'push' | 'gizmo';
       x: number; y: number; x0: number; y0: number;
       /** The face being pushed, and how far it has travelled so far. */
       face?: number; distance?: number;
+      /** The handle being dragged, when the gizmo has the pointer. */
+      handle?: GizmoHandle;
     } | null
   >(null);
 
@@ -340,13 +395,91 @@ export function Viewport3D(props: Viewport3DProps) {
     return { normal, offset: lo + (hi - lo) * section.at };
   }, [section, props.mesh]);
 
-  const view = useMemo(() => viewMatrix(camera), [camera]);
-  const projection = useMemo(() => projectionMatrix(camera, aspect), [camera, aspect]);
+  /*
+   * The ground grid, rebuilt whenever the camera moves.
+   *
+   * Flattened here rather than in the renderer because this is where the camera lives, and
+   * because `gridFor` is pure and tested: everything that decides what the grid *is* stays
+   * testable, and the renderer only draws the lines it is handed.
+   */
+  const grid = useMemo(() => {
+    if (!showGrid) return null;
+    const g = gridFor(camera, size[1]);
 
+    const flatten = (lines: [Vec3, Vec3][]): Float32Array => {
+      const out = new Float32Array(lines.length * 6);
+      lines.forEach(([a, b], i) => out.set([...a, ...b], i * 6));
+      return out;
+    };
+
+    return { spec: g, minor: flatten(g.minor), major: flatten(g.major), axes: flatten(g.axes) };
+  }, [camera, size, showGrid]);
+
+  const measurement = useMemo(
+    () => (measurePoints.length === 2
+      ? measureBetween(measurePoints[0]!, measurePoints[1]!)
+      : null),
+    [measurePoints],
+  );
+
+  /** The measurement's ends and midpoint, as fractions of the viewport, for the overlay. */
+  const measureOnScreen = useMemo(() => {
+    const at = (p: Vec3) => projectPoint(camera, p, aspect);
+    const ends = measurePoints.map((m) => at(m.point));
+    return {
+      ends,
+      label: measurement ? at(measurement.midpoint) : null,
+    };
+  }, [measurePoints, measurement, camera, aspect]);
+
+  /**
+   * Where the gizmo sits: the centre of the selected feature's own geometry.
+   *
+   * Its own, not the part's. A gizmo parked at the whole model's centre while dragging one
+   * component of an assembly is a control that visibly does not belong to what it moves, and
+   * with several components stacked it is ambiguous which one is about to move.
+   */
   const selectedRange = useMemo((): [number, number] => {
     if (!props.selectedFeatureId) return [-1, -1];
     return props.featureFaceRange.get(props.selectedFeatureId) ?? [-1, -1];
   }, [props.selectedFeatureId, props.featureFaceRange]);
+
+  const gizmoAt = useMemo((): Vec3 | null => {
+    const [lo, hi] = selectedRange;
+    if (lo < 0 || !props.onMovePart) return null;
+
+    let min: Vec3 = [Infinity, Infinity, Infinity];
+    let max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    let found = false;
+
+    for (let t = 0; t < triCount(props.mesh); t++) {
+      const face = props.mesh.faceIds[t]!;
+      if (face < lo || face > hi) continue;
+
+      for (const v of getTriangle(props.mesh, t)) {
+        for (let i = 0; i < 3; i++) {
+          if (v[i]! < min[i]!) min[i] = v[i]!;
+          if (v[i]! > max[i]!) max[i] = v[i]!;
+        }
+      }
+      found = true;
+    }
+
+    return found ? gizmoOrigin(min, max) : null;
+  }, [selectedRange, props.mesh, props.onMovePart]);
+
+  const handles = useMemo(
+    () => (showGizmo && gizmoAt && !measuring ? gizmoHandles(camera, gizmoAt, aspect) : []),
+    [showGizmo, gizmoAt, measuring, camera, aspect],
+  );
+
+  const scaleBar = useMemo(() => scaleBarFor(camera, size[1]), [camera, size]);
+  const triad = useMemo(() => triadFor(camera), [camera]);
+  const cubeFaces = useMemo(() => viewCubeFaces(camera), [camera]);
+
+  const view = useMemo(() => viewMatrix(camera), [camera]);
+  const projection = useMemo(() => projectionMatrix(camera, aspect), [camera, aspect]);
+
 
   useEffect(() => {
     const r = rendererRef.current;
@@ -363,10 +496,14 @@ export function Viewport3D(props: Viewport3DProps) {
       hoverFace,
       selectedFeatureRange: selectedRange,
       showEdges,
+      // Shaded with the edge toggle off is plain shaded; the toggle cannot turn edges off in
+      // the two modes that are nothing but edges.
+      displayMode: displayMode === 'shadedEdges' && !showEdges ? 'shaded' : displayMode,
+      grid,
       dark: props.dark !== false,
       section: sectionPlane,
     });
-  }, [view, projection, size, props.pickedFaces, hoverFace, selectedRange, showEdges, props.dark, props.mesh, props.faceColours, sectionPlane]);
+  }, [view, projection, size, props.pickedFaces, hoverFace, selectedRange, showEdges, displayMode, grid, props.dark, props.mesh, props.faceColours, sectionPlane]);
 
   // ── interaction ──
 
@@ -385,7 +522,21 @@ export function Viewport3D(props: Viewport3DProps) {
   }, [size, aspect]);
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    /*
+     * Capture the pointer, and do not let failing to capture it cost the click.
+     *
+     * `setPointerCapture` throws `NotFoundError` when the pointer id is no longer active — a
+     * race that happens for real when a pointer is released between the event being queued and
+     * the handler running, and every time under a synthetic event. Uncaught, the throw takes
+     * the rest of this handler with it: the click does nothing at all, silently, and the
+     * viewport looks dead rather than broken. Capture is an optimisation for dragging outside
+     * the canvas; the click is the thing that matters.
+     */
+    try {
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+    } catch {
+      // Nothing to do: the drag simply ends if the pointer leaves the canvas.
+    }
 
     // Middle button or shift pans, matching the convention in every CAD package. The right
     // button moves the selected part — the camera has two ways to be driven already, and the
@@ -402,6 +553,57 @@ export function Viewport3D(props: Viewport3DProps) {
      * not cost the plain drag its meaning. Requiring the face to be selected first is what
      * keeps orbit predictable: a drag that started anywhere else on the model still turns it.
      */
+    /*
+     * Measuring takes the click before anything else can.
+     *
+     * A ray through the pointer, snapped to the nearest thing worth measuring to. The snap
+     * tolerance is ten pixels converted to millimetres at the current zoom, so it grabs the
+     * same distance on screen whether the part is a watch pinion or a chassis rail.
+     */
+    if (measuring && e.button === 0) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        const c = cameraRef.current;
+        const { origin, direction } = pickRay(
+          c, (e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height, aspect,
+        );
+        const hit = snap(props.mesh, origin, direction, mmPerPixel(c, rect.height) * 10);
+
+        // A click on empty space clears rather than measuring to nothing.
+        if (!hit) setMeasurePoints([]);
+        else setMeasurePoints((pts) => (pts.length >= 2 ? [hit] : [...pts, hit]));
+      }
+      e.preventDefault();
+      return;
+    }
+
+    /*
+     * A gizmo handle takes the drag ahead of the camera.
+     *
+     * Before the pick, because the handles are drawn over the part and a drag that started on
+     * an arrow has to move the part rather than orbit the view — even where the arrow happens
+     * to lie over the model it belongs to, which is most of the time.
+     */
+    if (handles.length > 0 && e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const grabbed = rect
+        ? grabHandle(
+            handles,
+            (e.clientX - rect.left) / rect.width,
+            (e.clientY - rect.top) / rect.height,
+            aspect,
+          )
+        : null;
+
+      if (grabbed) {
+        dragRef.current = {
+          mode: 'gizmo', handle: grabbed,
+          x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY,
+        };
+        return;
+      }
+    }
+
     const under = e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey
       ? pickAt(e.clientX, e.clientY)
       : -1;
@@ -419,7 +621,8 @@ export function Viewport3D(props: Viewport3DProps) {
     };
     if (mode === 'push') setPushing({ face: under, distance: 0 });
     if (mode === 'band') setBand({ x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY });
-  }, [props.selectedFeatureId, props.onMovePart, props.onPushPull, props.pickedFaces, pickAt]);
+  }, [props.selectedFeatureId, props.onMovePart, props.onPushPull, props.pickedFaces, pickAt,
+      measuring, props.mesh, aspect, handles]);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     const drag = dragRef.current;
@@ -471,11 +674,53 @@ export function Viewport3D(props: Viewport3DProps) {
 
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
+
+    /*
+     * Where the pointer was, kept before the anchor is advanced.
+     *
+     * A rotation is measured as the angle swept *between two positions*, not from a delta, so
+     * it needs the previous point rather than the distance travelled. Reading `drag.x` after
+     * the anchor had already been moved to the current position meant the two points were the
+     * same one: every frame swept exactly zero degrees, the gizmo grabbed, dragged, released
+     * and turned the part by nothing at all, with no error anywhere to show for it.
+     */
+    const wasAt = { x: drag.x, y: drag.y };
+
     drag.x = e.clientX;
     drag.y = e.clientY;
 
     const rect = canvasRef.current?.getBoundingClientRect();
     const w = rect?.width ?? 1, h = rect?.height ?? 1;
+
+    if (drag.mode === 'gizmo' && drag.handle) {
+      const c = cameraRef.current;
+      const { axis, mode } = drag.handle;
+
+      if (mode === 'move') {
+        // Along one axis only. `dragAlongAxis` returns zero for an axis too edge-on to mean
+        // anything, so a handle that cannot be dragged simply does not move the part.
+        const mm = dragAlongAxis(c, axis, dx, dy, h);
+        props.onMovePart?.(
+          axis === 'x' ? mm : 0,
+          axis === 'y' ? mm : 0,
+          axis === 'z' ? mm : 0,
+        );
+      } else if (gizmoAt && rect) {
+        const point = (cx: number, cy: number) => ({
+          x: (cx - rect.left) / rect.width,
+          y: (cy - rect.top) / rect.height,
+        });
+        const deg = dragAboutAxis(
+          c, axis, gizmoAt, aspect, point(wasAt.x, wasAt.y), point(e.clientX, e.clientY),
+        );
+        props.onRotatePart?.(
+          axis === 'x' ? deg : 0,
+          axis === 'y' ? deg : 0,
+          axis === 'z' ? deg : 0,
+        );
+      }
+      return;
+    }
 
     if (drag.mode === 'move') {
       // Dragged in the plane facing the viewer, which is the only motion a single pointer can
@@ -621,11 +866,35 @@ export function Viewport3D(props: Viewport3DProps) {
         e.preventDefault();
       }
       if (e.key === 'e' || e.key === 'E') { setShowEdges((v) => !v); e.preventDefault(); }
+      if (e.key === 'g' || e.key === 'G') { setShowGrid((v) => !v); e.preventDefault(); }
+      if (e.key === 't' || e.key === 'T') { setShowGizmo((v) => !v); e.preventDefault(); }
+      if (e.key === 'm' || e.key === 'M') {
+        setMeasuring((v) => !v);
+        setMeasurePoints([]);
+        e.preventDefault();
+      }
+      if (e.key === 'Escape' && measuring) {
+        setMeasuring(false);
+        setMeasurePoints([]);
+        e.preventDefault();
+      }
+      if (e.key === 'p' || e.key === 'P') {
+        setCamera((c) => ({ ...c, orthographic: !c.orthographic }));
+        e.preventDefault();
+      }
+      if (e.key === 'w' || e.key === 'W') {
+        // Round the display modes, which is how every package with more than two does it.
+        setDisplayMode((m) => {
+          const order = DISPLAY_MODES.map((d) => d.mode);
+          return order[(order.indexOf(m) + 1) % order.length]!;
+        });
+        e.preventDefault();
+      }
     };
 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [doFit]);
+  }, [doFit, measuring]);
 
   const active = closestNamedView(camera);
   const empty = triCount(props.mesh) === 0;
@@ -694,7 +963,197 @@ export function Viewport3D(props: Viewport3DProps) {
         >
           SEC
         </button>
+        <button
+          title="Move and turn handles on the selected part (T)"
+          aria-pressed={showGizmo}
+          onClick={() => setShowGizmo((v) => !v)}
+        >
+          MOV
+        </button>
+        <button
+          title="Measure — click two points; corners, edges and bore centres snap (M)"
+          aria-pressed={measuring}
+          onClick={() => { setMeasuring((v) => !v); setMeasurePoints([]); }}
+        >
+          MEA
+        </button>
+        <button
+          title="Ground grid (G)"
+          aria-pressed={showGrid}
+          onClick={() => setShowGrid((v) => !v)}
+        >
+          GRD
+        </button>
+        <button
+          title={camera.orthographic
+            ? 'Orthographic — equal features measure equally wherever they are (P)'
+            : 'Perspective — nearer is bigger, which is for looking rather than measuring (P)'}
+          aria-pressed={!camera.orthographic}
+          onClick={() => setCamera((c) => ({ ...c, orthographic: !c.orthographic }))}
+        >
+          {camera.orthographic ? 'ORT' : 'PSP'}
+        </button>
       </div>
+
+      <div className="vp3d-modes" role="group" aria-label="Display mode">
+        {DISPLAY_MODES.map((m) => (
+          <button
+            key={m.mode}
+            title={m.title}
+            aria-pressed={displayMode === m.mode}
+            onClick={() => setDisplayMode(m.mode)}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      {/*
+        * The view cube.
+        *
+        * Drawn as SVG over the canvas rather than as geometry inside it, because it is not part
+        * of the scene: it must never be picked, sectioned, fitted to, or lit, and keeping it out
+        * of the WebGL context is the simplest way to guarantee all four. The faces come back
+        * sorted back to front, so drawing them in order gives a solid cube.
+        */}
+      <svg
+        className="vp3d-cube"
+        viewBox="0 0 100 100"
+        role="group"
+        aria-label="View cube"
+        onPointerDown={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          const hit = viewCubeHit(camera,
+            (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+          if (hit) setCamera((c) => namedView(c, hit));
+        }}
+      >
+        {cubeFaces.map((f) => (
+          <polygon
+            key={f.view}
+            className={`vp3d-cube-face${f.facing > 1e-3 ? ' is-front' : ''}`}
+            points={f.corners.map((c) => `${c[0] * 100},${c[1] * 100}`).join(' ')}
+            style={{ opacity: f.facing > 1e-3 ? 0.35 + f.facing * 0.5 : 0.12 }}
+          />
+        ))}
+        {cubeFaces.filter((f) => f.facing > 0.35).map((f) => (
+          <text
+            key={`t-${f.view}`}
+            className="vp3d-cube-label"
+            x={f.centre[0] * 100}
+            y={f.centre[1] * 100}
+          >
+            {f.label}
+          </text>
+        ))}
+      </svg>
+
+      {/*
+        * The origin triad, which is the answer to "which way is up in this view".
+        *
+        * An axis pointing away from the viewer is drawn faint. Without that cue a top view and
+        * a bottom view are the same picture, and a part can be modelled upside down.
+        */}
+      <svg className="vp3d-triad" viewBox="-50 -50 100 100" aria-hidden="true">
+        {triad.map((a) => (
+          <g key={a.axis} style={{ opacity: a.towards < -0.2 ? 0.3 : 1 }}>
+            <line
+              className={`vp3d-axis vp3d-axis-${a.axis.toLowerCase()}`}
+              x1={0} y1={0} x2={a.screen[0] * 34} y2={a.screen[1] * 34}
+            />
+            <text
+              className="vp3d-axis-label"
+              x={a.screen[0] * 44} y={a.screen[1] * 44}
+            >
+              {a.axis}
+            </text>
+          </g>
+        ))}
+      </svg>
+
+      {/*
+        * The move-and-turn gizmo.
+        *
+        * SVG over the canvas, like the view cube and for the same reason: it is a control, not
+        * geometry, and it must never be picked, sectioned, lit or fitted to. Handles that are
+        * no use from this angle are drawn faded rather than hidden — a gizmo whose arrows come
+        * and go as you orbit reads as broken, and the faded arrow tells you what to do about
+        * it, which is turn the model.
+        */}
+      {handles.length > 0 && (
+        <svg className="vp3d-gizmo" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
+          {handles.filter((h) => h.mode === 'move').map((h) => (
+            <g key={`m-${h.axis}`} className={`vp3d-giz vp3d-giz-${h.axis}`} opacity={h.usable ? 1 : 0.25}>
+              <line x1={h.from.x * 1000} y1={h.from.y * 1000} x2={h.at.x * 1000} y2={h.at.y * 1000} />
+              <circle cx={h.at.x * 1000} cy={h.at.y * 1000} r={9} />
+            </g>
+          ))}
+          {handles.filter((h) => h.mode === 'turn').map((h) => (
+            <g key={`t-${h.axis}`} className={`vp3d-giz vp3d-giz-${h.axis}`} opacity={h.usable ? 0.9 : 0.2}>
+              <circle
+                className="vp3d-giz-turn"
+                cx={h.at.x * 1000} cy={h.at.y * 1000} r={7}
+              />
+            </g>
+          ))}
+        </svg>
+      )}
+
+      {/*
+        * The measurement, drawn over the canvas.
+        *
+        * In SVG rather than as geometry, for the same reason as the view cube: it is an
+        * annotation, not part of the model, and it must never be picked, sectioned or fitted
+        * to. Ends are marked and the span between them is drawn dashed, which is how a
+        * dimension reads on a drawing.
+        */}
+      {measurePoints.length > 0 && (
+        <svg className="vp3d-measure" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
+          {measureOnScreen.ends.length === 2
+            && measureOnScreen.ends[0] && measureOnScreen.ends[1] && (
+            <line
+              className="vp3d-measure-line"
+              x1={measureOnScreen.ends[0].x * 1000} y1={measureOnScreen.ends[0].y * 1000}
+              x2={measureOnScreen.ends[1].x * 1000} y2={measureOnScreen.ends[1].y * 1000}
+            />
+          )}
+          {measureOnScreen.ends.map((p, i) => p && (
+            <circle
+              key={i}
+              className="vp3d-measure-end"
+              cx={p.x * 1000} cy={p.y * 1000} r={5}
+            />
+          ))}
+        </svg>
+      )}
+
+      {measuring && (
+        <div className="vp3d-measure-readout" role="status">
+          {measurement ? (
+            <>
+              <strong>{measurement.distanceMm.toFixed(3)} mm</strong>
+              <span>
+                ΔX {measurement.deltaMm[0].toFixed(2)} · ΔY {measurement.deltaMm[1].toFixed(2)}
+                {' '}· ΔZ {measurement.deltaMm[2].toFixed(2)}
+              </span>
+              <span className="vp3d-measure-what">{measurement.description}</span>
+            </>
+          ) : (
+            <span>
+              {measurePoints.length === 0
+                ? 'Click a point on the part.'
+                : `From a ${measurePoints[0]!.kind === 'centre' ? 'bore axis' : measurePoints[0]!.kind}. Click the second point.`}
+            </span>
+          )}
+        </div>
+      )}
+
+      {scaleBar && (
+        <div className="vp3d-scale" aria-label={`Scale: ${scaleBar.label}`}>
+          <span className="vp3d-scale-bar" style={{ width: `${scaleBar.widthPx}px` }} />
+          <span className="vp3d-scale-label">{scaleBar.label}</span>
+        </div>
+      )}
 
       {section && (
         <div className="vp3d-section" role="group" aria-label="Section plane">

@@ -39,6 +39,13 @@
       injected code cannot post a key anywhere it does not already belong. script-src 'self'
       still refuses to load script from another origin at all.
 
+      One more origin is named for the depth model's weights: huggingface.co, and cdn-lfs*, which
+      is where a release of any size is actually served from. It is a *download*, not an upload —
+      the picture never leaves this origin, and connect-src still refuses to post anything to a
+      host that is not on this list. Named exactly rather than widened to https:, and added only
+      because a user who asks to read a photograph's depth has to be able to fetch the model that
+      reads it; nothing fetches it unasked.
+
       What is bought: every boolean in the application. Filleting a box went from ten edges of
       twelve to all twelve, a cup from 19 396 triangles to 3 538, a rebuild from 1.1 s to
       0.12 s, and the defect that shaped most of the kernel's workarounds — a second cut into
@@ -46,7 +53,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://generativelanguage.googleapis.com https://api.anthropic.com https://api.openai.com https://api.groq.com https://*.openai.azure.com http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://generativelanguage.googleapis.com https://api.anthropic.com https://api.openai.com https://api.groq.com https://*.openai.azure.com https://huggingface.co https://*.hf.co https://cdn-lfs.hf.co https://cdn-lfs-us-1.hf.co http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
     <title>DATUM</title>
   </head>

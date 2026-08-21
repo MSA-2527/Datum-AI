@@ -393,3 +393,67 @@ describe('a limit measured against a window that is already partly spent', () =>
     expect(second[0]).toBe(2000);
   });
 });
+
+describe('when a provider says 429', () => {
+  /*
+   * Two different failures arrive under one status code, and the advice for each is the opposite
+   * of the advice for the other. A burst limit clears in a minute. A spent quota does not clear
+   * at all until the tier resets — and somebody told to "wait and try again" sits there retrying
+   * an account that will not answer until tomorrow.
+   */
+  const at429 = (body: string) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 429 })));
+  };
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('reads a spent quota as spent, and does not tell the user to wait', async () => {
+    at429(JSON.stringify({
+      error: {
+        message: 'You exceeded your current quota, please check your plan and billing details.',
+      },
+    }));
+
+    const reply = await complete(
+      { id: 'gemini', model: 'test', apiKey: 'k', allowWebSearch: false },
+      { system: 's', user: 'u' },
+    );
+
+    expect(reply.ok).toBe(false);
+    if (reply.ok) return;
+
+    expect(reply.message).toContain('quota is spent');
+    expect(reply.message).not.toContain('Wait a minute');
+    // Not retryable: retrying is precisely what will not help.
+    expect(reply.retryable).toBe(false);
+  });
+
+  it('reads a burst limit as a burst limit, and says to wait', async () => {
+    at429(JSON.stringify({ error: { message: 'Too many requests. Slow down.' } }));
+
+    const reply = await complete(
+      { id: 'gemini', model: 'test', apiKey: 'k', allowWebSearch: false },
+      { system: 's', user: 'u' },
+    );
+
+    expect(reply.ok).toBe(false);
+    if (reply.ok) return;
+
+    expect(reply.message).toContain('Wait a minute');
+    expect(reply.retryable).toBe(true);
+  });
+
+  it('keeps the provider’s own words, so the limit can be looked up', async () => {
+    at429(JSON.stringify({
+      error: { message: 'You exceeded your current quota. See https://ai.google.dev/rate-limits' },
+    }));
+
+    const reply = await complete(
+      { id: 'gemini', model: 'test', apiKey: 'k', allowWebSearch: false },
+      { system: 's', user: 'u' },
+    );
+
+    if (reply.ok) return;
+    expect(reply.detail).toContain('ai.google.dev');
+  });
+});
